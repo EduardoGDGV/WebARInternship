@@ -137,7 +137,6 @@ async function cleanupBots() {
         await b.socket.rpc("rpcLeaveCell", JSON.stringify({ lat : n.lat, lon : n.lon }));
       } catch {}
     }
-    try { await b.socket.disconnect(); } catch {}
     try { await client.deleteAccount(b.session); } catch {}
   }
 
@@ -157,5 +156,5 @@ process.on('SIGINT', async () => {
   // Auto-cleanup after 30s
   setTimeout(async () => {
     await cleanupBots();
-  }, 30000);
+  }, 60000);
 })();
