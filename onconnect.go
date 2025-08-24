@@ -30,7 +30,7 @@ func acquireLock(nk runtime.NakamaModule, key, userID string) bool {
 		records, err := nk.StorageRead(context.Background(), []*runtime.StorageRead{{
 			Collection: LockCollection,
 			Key:        key,
-			UserID:     userID,
+			UserID:     "",
 		}})
 		if err != nil {
 			return false
@@ -43,8 +43,10 @@ func acquireLock(nk runtime.NakamaModule, key, userID string) bool {
 			_, err := nk.StorageWrite(context.Background(), []*runtime.StorageWrite{{
 				Collection: LockCollection,
 				Key:        key,
-				UserID:     userID,
 				Value:      string(val),
+				UserID:     "",
+				PermissionRead:  2, // public
+    			PermissionWrite: 2, // public
 			}})
 			return err == nil
 		}
@@ -57,8 +59,10 @@ func releaseLock(nk runtime.NakamaModule, key, userID string) {
 	_, _ = nk.StorageWrite(context.Background(), []*runtime.StorageWrite{{
 		Collection: LockCollection,
 		Key:        key,
-		UserID:     userID,
 		Value:      string(val),
+		UserID:     "",
+		PermissionRead:  2, // public
+    	PermissionWrite: 2, // public
 	}})
 }
 
@@ -66,8 +70,8 @@ func releaseLock(nk runtime.NakamaModule, key, userID string) {
 // --- Group Helpers ---
 //
 
-func createGroup(nk runtime.NakamaModule, ownerID, name string, logger runtime.Logger) (*api.Group, error) {
-	group, err := nk.GroupCreate(context.Background(), ownerID, name, "", "", "", "", true, map[string]interface{}{}, MaxGroupSize)
+func createGroup(nk runtime.NakamaModule, userID string, name string, logger runtime.Logger) (*api.Group, error) {
+	group, err := nk.GroupCreate(context.Background(), userID, name, "", "", "", "", true, map[string]interface{}{}, MaxGroupSize)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +82,7 @@ func createGroup(nk runtime.NakamaModule, ownerID, name string, logger runtime.L
 func getGroups(nk runtime.NakamaModule, logger runtime.Logger) ([]*api.Group, error) {
 	members := 10
 	open := true
-	groups, _, err := nk.GroupsList(context.Background(), GroupNamePrefix, "", &members, &open, 200, "")
+	groups, _, err := nk.GroupsList(context.Background(), "", "", &members, &open, 100, "")
 	if err != nil {
 		return nil, err
 	}
@@ -104,10 +108,14 @@ func handlePlayerJoin(nk runtime.NakamaModule, userID string, logger runtime.Log
 		return
 	}
 
+	logger.Info("User %s joining. Current groups: %d", userID, len(groups))
+
 	if len(groups) == 0 {
 		g, err := createGroup(nk, userID, fmt.Sprintf("%s_%d", GroupNamePrefix, 1), logger)
 		if err == nil {
 			_ = nk.GroupUsersAdd(context.Background(), "", g.Id, []string{userID})
+		}else{
+			logger.Error("Error creating group: %v", err)
 		}
 		return
 	}
@@ -115,7 +123,9 @@ func handlePlayerJoin(nk runtime.NakamaModule, userID string, logger runtime.Log
 	lastGroup := groups[len(groups)-1]
 	members, _, _ := nk.GroupUsersList(context.Background(), lastGroup.Id, 100, &member_state, "")
 
-	if len(members) >= MaxGroupSize {
+	logger.Info("Last group %s has %d members", lastGroup.Id, len(members) + 1)
+
+	if len(members) + 1 >= MaxGroupSize {
 		g, err := createGroup(nk, userID, fmt.Sprintf("%s_%d", GroupNamePrefix, len(groups)+1), logger)
 		if err != nil {
 			return
@@ -215,25 +225,32 @@ func handlePlayerLeave(nk runtime.NakamaModule, userID string, logger runtime.Lo
 //
 // --- Init Module ---
 //
-
-func eventSessionStart(ctx context.Context, logger runtime.Logger, evt *api.Event) {
-	logger.Debug("process event session start: %+v", evt)
-    //handlePlayerJoin(nk, evt.UserId, logger)
-}
-
-func eventSessionEnd(ctx context.Context, logger runtime.Logger, evt *api.Event) {
-	logger.Debug("process event session end: %+v", evt)
-   //handlePlayerLeave(nk, evt.UserId, logger)
-}
-
 func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
-	if err := initializer.RegisterEventSessionStart(eventSessionStart); err != nil {
-		return err
-	}
-	
-	if err := initializer.RegisterEventSessionEnd(eventSessionEnd); err != nil {
-		return err
-	}
+	if err := initializer.RegisterEventSessionStart(
+        func(ctx context.Context, logger runtime.Logger, evt *api.Event) {
+            userID, ok := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+            if !ok {
+                logger.Error("no user_id in ctx")
+                return
+            }
+            handlePlayerJoin(nk, userID, logger)
+        },
+    ); err != nil {
+        return err
+    }
+
+    if err := initializer.RegisterEventSessionEnd(
+        func(ctx context.Context, logger runtime.Logger, evt *api.Event) {
+            userID, ok := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+            if !ok {
+                logger.Error("no user_id in ctx")
+                return
+            }
+            handlePlayerLeave(nk, userID, logger)
+        },
+    ); err != nil {
+        return err
+    }
 
 	logger.Info("Group balancing module loaded (Go).")
 	return nil

@@ -5,7 +5,7 @@ local STREAM_MODE = 2
 
 -- Join a cell stream
 local function join_cell(context, payload)
-    nk.logger_info("join_cell called with payload: " .. tostring(payload))
+    --nk.logger_info("join_cell called with payload: " .. tostring(payload))
 
     local success, data = pcall(nk.json_decode, payload)
     if not success then
@@ -27,7 +27,7 @@ nk.register_rpc(join_cell, "rpcJoinCell")
 
 -- Leave a stream
 local function leave_cell(context, payload)
-    nk.logger_info("leave_cell called with payload: " .. tostring(payload))
+    --nk.logger_info("leave_cell called with payload: " .. tostring(payload))
     
     local success, json = pcall(nk.json_decode, payload)
     if not success then
@@ -46,7 +46,7 @@ local function leave_cell(context, payload)
         label = string.format("cell_%f_%f", lat, lon)
     }
 
-    nk.logger_info("Leaving stream: " .. stream_id.label .. " for user " .. context.user_id)
+    --nk.logger_info("Leaving stream: " .. stream_id.label .. " for user " .. context.user_id)
     nk.stream_user_leave(context.user_id, context.session_id, stream_id)
 
     return nk.json_encode({ status = "ok", stream = stream_id.label })
@@ -55,7 +55,7 @@ nk.register_rpc(leave_cell, "rpcLeaveCell")
 
 -- Send data to a stream
 local function send_cell_data(context, payload)
-    nk.logger_info("send_cell_data called with payload: " .. tostring(payload))
+    --nk.logger_info("send_cell_data called with payload: " .. tostring(payload))
 
     local success, json = pcall(nk.json_decode, payload)
     if not success then
@@ -74,7 +74,7 @@ local function send_cell_data(context, payload)
         label = string.format("cell_%f_%f", lat, lon)
     }
 
-    nk.logger_info("Sending data from " .. context.user_id .. " to stream " .. stream_id.label)
+    --nk.logger_info("Sending data from " .. context.user_id .. " to stream " .. stream_id.label)
     nk.stream_send(stream_id, nk.json_encode({ user_id = context.user_id, data = data }))
 
     return nk.json_encode({ status = "ok" })
@@ -83,7 +83,7 @@ nk.register_rpc(send_cell_data, "rpcSendCellData")
 
 -- Check if user is in a stream
 local function check_cell_presence(context, payload)
-    nk.logger_info("check_cell_presence called with payload: " .. tostring(payload))
+    --nk.logger_info("check_cell_presence called with payload: " .. tostring(payload))
 
     local success, json = pcall(nk.json_decode, payload)
     if not success then
@@ -103,7 +103,7 @@ local function check_cell_presence(context, payload)
     }
 
     local meta = nk.stream_user_get(context.user_id, context.session_id, stream_id)
-    nk.logger_info("User " .. context.user_id .. " presence in stream " .. stream_id.label .. ": " .. tostring(meta ~= nil))
+    --nk.logger_info("User " .. context.user_id .. " presence in stream " .. stream_id.label .. ": " .. tostring(meta ~= nil))
 
     return nk.json_encode({ present = meta ~= nil })
 end
