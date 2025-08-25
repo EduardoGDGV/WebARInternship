@@ -47,7 +47,7 @@ async function createBot(i) {
     let neighbors = getNeighborCells(cell);
     for (const n of neighbors) {
       try {
-        await socket.rpc("rpcJoinCell", JSON.stringify({ lat : n.lat, lon : n.lon }));
+        await socket.rpc("rpcjoincell", JSON.stringify({ lat : n.lat, lon : n.lon }));
       } catch {}
     }
     console.log(`🤖 Bot ${i} joined neighborhood around`, cell);
@@ -67,20 +67,20 @@ async function createBot(i) {
 
           // leave 3 cells behind and join the 3 in front
           if (dLat !== 0) {
-            await socket.rpc("rpcLeaveCell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon - CELL_SIZE }));
-            await socket.rpc("rpcLeaveCell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon }));
-            await socket.rpc("rpcLeaveCell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon + CELL_SIZE }));
-            await socket.rpc("rpcJoinCell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon - CELL_SIZE }));
-            await socket.rpc("rpcJoinCell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon }));
-            await socket.rpc("rpcJoinCell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon + CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon - CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon + CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon - CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon + CELL_SIZE }));
           }
           if (dLon !== 0) {
-            await socket.rpc("rpcLeaveCell", JSON.stringify({ lat : cell.cellLat - CELL_SIZE, lon : cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcLeaveCell", JSON.stringify({ lat : cell.cellLat, lon : cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcLeaveCell", JSON.stringify({ lat : cell.cellLat + CELL_SIZE, lon : cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcJoinCell", JSON.stringify({ lat : newCell.cellLat - CELL_SIZE, lon : newCell.cellLon + dLon * CELL_SIZE }));
-            await socket.rpc("rpcJoinCell", JSON.stringify({ lat : newCell.cellLat, lon : newCell.cellLon + dLon * CELL_SIZE }));
-            await socket.rpc("rpcJoinCell", JSON.stringify({ lat : newCell.cellLat + CELL_SIZE, lon : newCell.cellLon + dLon * CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - CELL_SIZE, lon : cell.cellLon - dLon * CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat, lon : cell.cellLon - dLon * CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat + CELL_SIZE, lon : cell.cellLon - dLon * CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat - CELL_SIZE, lon : newCell.cellLon + dLon * CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat, lon : newCell.cellLon + dLon * CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + CELL_SIZE, lon : newCell.cellLon + dLon * CELL_SIZE }));
           }
           cell = newCell;
         } catch (e) {
@@ -90,7 +90,7 @@ async function createBot(i) {
 
       try {
         await socket.rpc(
-          "rpcSendCellData",
+          "rpcsendlocation",
           JSON.stringify({ lat: cell.cellLat, lon: cell.cellLon, data: { lat, lon } })
         );
       } catch (e) {

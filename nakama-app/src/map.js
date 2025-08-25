@@ -10,6 +10,7 @@ let myMarker = null;
 const CELL_SIZE = 0.002; // ~200m
 
 var redIcon = new L.Icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png'});
+var blueIcon = new L.Icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png'});
 
 function getCell(lat, lon) {
   return {
@@ -103,11 +104,14 @@ function setupStreamHandlers(map) {
 
     if (!markers[key]) markers[key] = {};
 
+    const icon = msg.from_group ? blueIcon : redIcon;
+
     if (markers[key][playerId]) {
       markers[key][playerId].marker.setLatLng([pos.lat, pos.lon]);
       markers[key][playerId].lastUpdate = Date.now();
+      markers[key][playerId].marker.setIcon(icon); // update color if needed
     } else {
-      const marker = L.marker([pos.lat, pos.lon], { icon: redIcon }).addTo(map)
+      const marker = L.marker([pos.lat, pos.lon], { icon }).addTo(map)
         .bindPopup(`Player: ${playerId}`);
       markers[key][playerId] = { marker : marker, lastUpdate: Date.now() };
     }
@@ -125,6 +129,16 @@ function setupStreamHandlers(map) {
         }
       }
     });
+  };
+
+  // Listen for notifications
+  socket.onnotification = (notification) => {
+    console.log("Received notification:", notification);
+    if (notification.subject === "group_move") {
+      const data = notification.content; // already parsed JSON
+      socket.rpc("rpcleavegroup", data.leave);
+      socket.rpc("rpcjoingroup", data.enter);
+    }
   };
 
   // Periodic cleanup
@@ -179,7 +193,7 @@ function startPositionUpdates(map, currentCell, lat, lon) {
       currentCell = newCell;
     }
 
-    await socket.rpc("rpcSendCellData",
+    await socket.rpc("rpcsendlocation",
       JSON.stringify({
         lat: currentCell.cellLat,
         lon: currentCell.cellLon,
