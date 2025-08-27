@@ -50,7 +50,7 @@ async function createBot(i) {
         await socket.rpc("rpcjoincell", JSON.stringify({ lat : n.lat, lon : n.lon }));
       } catch {}
     }
-    console.log(`🤖 Bot ${i} joined neighborhood around`, cell);
+    console.log(`Bot ${i} joined neighborhood around`, cell);
 
     const interval = setInterval(async () => {
       if (cleaningUp) return; // stop sending updates if cleaning
@@ -96,6 +96,14 @@ async function createBot(i) {
       } catch (e) {
         console.error(`Bot ${i} failed sending position`, e);
       }
+      // Listen for notifications
+      socket.onnotification = (notification) => {
+        if (notification.subject === "group_move") {
+          const data = notification.content;
+          socket.rpc("rpcleavegroup", data.leave);
+          socket.rpc("rpcjoingroup", data.enter);
+        }
+      };
     }, 1000);
 
     bots.push({ session, socket, interval, lat, lon, cell });
@@ -122,7 +130,7 @@ async function cleanupBots() {
   if (cleaningUp) return;
   cleaningUp = true;
 
-  console.log("🗑️ Cleaning up bots...");
+  console.log("Cleaning up bots...");
 
   // Stop all intervals first
   for (const b of bots) {
@@ -140,7 +148,7 @@ async function cleanupBots() {
     try { await client.deleteAccount(b.session); } catch {}
   }
 
-  console.log("🗑️ All bots cleaned up");
+  console.log("All bots cleaned up");
   process.exit();
 }
 

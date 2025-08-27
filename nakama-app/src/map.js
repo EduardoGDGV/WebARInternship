@@ -4,13 +4,47 @@ import L from "leaflet";
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 let session = null;
 let socket = null;
-let markers = {}; // { cellKey: { playerId: { marker, lastUpdate } } }
+let markers = {}; // { playerId: { marker, lastUpdate } }
 let myMarker = null;
-
+let buildingMarkers = [];
 const CELL_SIZE = 0.002; // ~200m
 
-var redIcon = new L.Icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png'});
-var blueIcon = new L.Icon({iconUrl:'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png'});
+var redIcon = new L.Icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png"
+});
+var blueIcon = new L.Icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png"
+});
+
+async function fetchBuildings() {
+  if (!socket) throw new Error("Socket not initialized");
+
+  // Call the RPC we created in Nakama
+  const result = await socket.rpc("get_buildings", "{}");
+  const buildings = JSON.parse(result.payload);
+  return buildings; // Array of {id, lat, lon, image}
+}
+
+async function addBuildingsToMap(map) {
+  const buildings = await fetchBuildings();
+
+  // Clear previous markers if needed
+  buildingMarkers.forEach((m) => map.removeLayer(m));
+  buildingMarkers = [];
+
+  buildings.forEach((bld) => {
+    if (bld.lat != null && bld.lon != null) {
+      const icon = L.icon({
+        iconUrl: bld.image ? bld.image : "default.png",
+        iconSize: [40, 40],
+      });
+      const marker = L.marker([bld.lat, bld.lon], { icon })
+        .addTo(map)
+        .bindPopup(`<a href="${bld.link}" target="_blank">${bld.slug}</a>`);
+      buildingMarkers.push(marker);
+    }
+  });
+}
 
 function getCell(lat, lon) {
   return {
@@ -33,20 +67,10 @@ function getNeighborCells(cell) {
 }
 
 async function joinCell(lat, lon) {
-  const key = `${lat},${lon}`;
-  if (!markers[key]) markers[key] = {}; // prepare slot for incoming markers
   await socket.rpc("rpcjoincell", JSON.stringify({ lat, lon }));
 }
 
-async function leaveCell(map, lat, lon) {
-  const key = `${lat},${lon}`;
-  if (markers[key]) {
-    // remove all markers sequentially
-    for (const playerId of Object.keys(markers[key])) {
-      map.removeLayer(markers[key][playerId].marker);
-      delete markers[key][playerId];
-    }
-  }
+async function leaveCell(lat, lon) {
   await socket.rpc("rpcleavecell", JSON.stringify({ lat, lon }));
 }
 
@@ -92,41 +116,39 @@ function setupStreamHandlers(map) {
   socket.onstreamdata = (streamData) => {
     const msg = JSON.parse(streamData.data);
     const playerId = msg.user_id;
-
     const pos = msg.data;
-    const cell = getCell(pos.lat, pos.lon);
-    const key = `${cell.cellLat},${cell.cellLon}`;
 
-    if (playerId === session.user_id){
-      map.setView([ myMarker.getLatLng().lat, myMarker.getLatLng().lng ]);
+    if (playerId === session.user_id) {
+      // keep map centered on me
+      map.setView([myMarker.getLatLng().lat, myMarker.getLatLng().lng]);
       return;
     }
 
-    if (!markers[key]) markers[key] = {};
-
     const icon = msg.from_group ? blueIcon : redIcon;
+    const now = Date.now();
 
-    if (markers[key][playerId]) {
-      markers[key][playerId].marker.setLatLng([pos.lat, pos.lon]);
-      markers[key][playerId].lastUpdate = Date.now();
-      markers[key][playerId].marker.setIcon(icon); // update color if needed
+    if (markers[playerId]) {
+      // update existing marker if last update is older than 500ms
+      markers[playerId].marker.setIcon(icon);
+      if (now - markers[playerId].lastUpdate > 500) {
+        markers[playerId].marker.setLatLng([pos.lat, pos.lon]);
+        markers[playerId].lastUpdate = now;
+      }
     } else {
-      const marker = L.marker([pos.lat, pos.lon], { icon }).addTo(map)
+      // create new marker
+      const marker = L.marker([pos.lat, pos.lon], { icon })
+        .addTo(map)
         .bindPopup(`Player: ${playerId}`);
-      markers[key][playerId] = { marker : marker, lastUpdate: Date.now() };
+      markers[playerId] = { marker, lastUpdate: Date.now() };
     }
   };
 
   socket.onstreampresence = (presence) => {
     presence.leaves.forEach((leave) => {
       const playerId = leave.user_id;
-
-      // Remove the player marker immediately from all cells
-      for (const cellKey in markers) {
-        if (markers[cellKey][playerId]) {
-          map.removeLayer(markers[cellKey][playerId].marker);
-          delete markers[cellKey][playerId];
-        }
+      if (markers[playerId]) {
+        map.removeLayer(markers[playerId].marker);
+        delete markers[playerId];
       }
     });
   };
@@ -135,30 +157,32 @@ function setupStreamHandlers(map) {
   socket.onnotification = (notification) => {
     console.log("Received notification:", notification);
     if (notification.subject === "group_move") {
-      const data = notification.content; // already parsed JSON
+      const data = notification.content;
       socket.rpc("rpcleavegroup", data.leave);
       socket.rpc("rpcjoingroup", data.enter);
+    }
+    if (notification.subject === "buildings_update") {
+        console.log("Refreshing buildings...");
+        addBuildingsToMap(map); // re-fetch RPC data
     }
   };
 
   // Periodic cleanup
   setInterval(() => {
     const now = Date.now();
-    for (const cellKey in markers) {
-      for (const playerId in markers[cellKey]) {
-        if (now - markers[cellKey][playerId].lastUpdate > 2000) {
-          map.removeLayer(markers[cellKey][playerId].marker);
-          delete markers[cellKey][playerId];
-        }
+    for (const playerId in markers) {
+      if (now - markers[playerId].lastUpdate > 2000) {
+        map.removeLayer(markers[playerId].marker);
+        delete markers[playerId];
       }
     }
-  }, 500); // check twice per second
+  }, 500);
 }
 
 /** Position update loop with optimized neighborhood change */
 function startPositionUpdates(map, currentCell, lat, lon) {
   setInterval(async () => {
-    // random walk
+    // random walk (demo only)
     lat += (Math.random() - 0.5) * 0.001;
     lon += (Math.random() - 0.5) * 0.001;
     myMarker.setLatLng([lat, lon]);
@@ -169,23 +193,24 @@ function startPositionUpdates(map, currentCell, lat, lon) {
       newCell.cellLat !== currentCell.cellLat ||
       newCell.cellLon !== currentCell.cellLon
     ) {
-      // detect movement direction
       const dLat = Math.sign(newCell.cellLat - currentCell.cellLat);
       const dLon = Math.sign(newCell.cellLon - currentCell.cellLon);
 
-      // leave 3 cells behind and join the 3 in front
+      // leave 3 cells behind and join 3 in front
       if (dLat !== 0) {
-        await leaveCell(map, currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon - CELL_SIZE);
-        await leaveCell(map, currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon);
-        await leaveCell(map, currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon + CELL_SIZE);
+        await leaveCell(currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon - CELL_SIZE);
+        await leaveCell(currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon);
+        await leaveCell(currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon + CELL_SIZE);
+
         await joinCell(newCell.cellLat + dLat * CELL_SIZE, newCell.cellLon - CELL_SIZE);
         await joinCell(newCell.cellLat + dLat * CELL_SIZE, newCell.cellLon);
         await joinCell(newCell.cellLat + dLat * CELL_SIZE, newCell.cellLon + CELL_SIZE);
       }
       if (dLon !== 0) {
-        await leaveCell(map, currentCell.cellLat - CELL_SIZE, currentCell.cellLon - dLon * CELL_SIZE);
-        await leaveCell(map, currentCell.cellLat, currentCell.cellLon - dLon * CELL_SIZE);
-        await leaveCell(map, currentCell.cellLat + CELL_SIZE, currentCell.cellLon - dLon * CELL_SIZE);
+        await leaveCell(currentCell.cellLat - CELL_SIZE, currentCell.cellLon - dLon * CELL_SIZE);
+        await leaveCell(currentCell.cellLat, currentCell.cellLon - dLon * CELL_SIZE);
+        await leaveCell(currentCell.cellLat + CELL_SIZE, currentCell.cellLon - dLon * CELL_SIZE);
+
         await joinCell(newCell.cellLat - CELL_SIZE, newCell.cellLon + dLon * CELL_SIZE);
         await joinCell(newCell.cellLat, newCell.cellLon + dLon * CELL_SIZE);
         await joinCell(newCell.cellLat + CELL_SIZE, newCell.cellLon + dLon * CELL_SIZE);
@@ -193,7 +218,9 @@ function startPositionUpdates(map, currentCell, lat, lon) {
       currentCell = newCell;
     }
 
-    await socket.rpc("rpcsendlocation",
+    // send location
+    await socket.rpc(
+      "rpcsendlocation",
       JSON.stringify({
         lat: currentCell.cellLat,
         lon: currentCell.cellLon,
@@ -209,6 +236,8 @@ export async function initMap(mapDivId) {
   await initSocket();
 
   const map = initLeaflet(mapDivId);
+  // Fetch buildings once at start
+  await addBuildingsToMap(map);
   let currentCell = getCell(37.7749, -122.4194);
 
   // join initial neighborhood

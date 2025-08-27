@@ -434,6 +434,10 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
         return err
     }
 
+	if err := InitBuildings(ctx, logger, db, nk, initializer); err != nil {
+        return err
+    }
+
 	if err := initializer.RegisterRpc("rpcJoinCell", rpcJoinCell); err != nil {
 		logger.Error("Unable to register: %v", err)
 		return err

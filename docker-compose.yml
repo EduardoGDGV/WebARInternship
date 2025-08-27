@@ -42,5 +42,32 @@ services:
       - "7351:7351"
     restart: unless-stopped
 
+  wordpress:
+    image: wordpress:latest
+    depends_on:
+      - mysql
+    ports:
+      - "8081:80"
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppass
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp_data:/var/www/html
+
+  mysql:
+    image: mysql:5.7
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wpuser
+      MYSQL_PASSWORD: wppass
+    volumes:
+      - mysql_data:/var/lib/mysql
+
 volumes:
   data:
+  wp_data:
+  mysql_data:
