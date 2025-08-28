@@ -120,7 +120,7 @@ function setupStreamHandlers(map) {
 
     if (playerId === session.user_id) {
       // keep map centered on me
-      map.setView([myMarker.getLatLng().lat, myMarker.getLatLng().lng]);
+      //map.setView([myMarker.getLatLng().lat, myMarker.getLatLng().lng]);
       return;
     }
 
@@ -156,11 +156,6 @@ function setupStreamHandlers(map) {
   // Listen for notifications
   socket.onnotification = (notification) => {
     console.log("Received notification:", notification);
-    if (notification.subject === "group_move") {
-      const data = notification.content;
-      socket.rpc("rpcleavegroup", data.leave);
-      socket.rpc("rpcjoingroup", data.enter);
-    }
     if (notification.subject === "buildings_update") {
         console.log("Refreshing buildings...");
         addBuildingsToMap(map); // re-fetch RPC data

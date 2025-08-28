@@ -97,11 +97,9 @@ async function createBot(i) {
         console.error(`Bot ${i} failed sending position`, e);
       }
       // Listen for notifications
-      socket.onnotification = (notification) => {
-        if (notification.subject === "group_move") {
-          const data = notification.content;
-          socket.rpc("rpcleavegroup", data.leave);
-          socket.rpc("rpcjoingroup", data.enter);
+      socket.onnotification = async (notification) => {
+        if (notification.subject === "buildings_update") {
+          const result = await socket.rpc("get_buildings", "{}");
         }
       };
     }, 1000);

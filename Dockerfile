@@ -1,7 +1,7 @@
 FROM heroiclabs/nakama-pluginbuilder:3.30.0 AS builder
 
-ENV GO111MODULE on
-ENV CGO_ENABLED 1
+ENV GO111MODULE=on
+ENV CGO_ENABLED=1
 
 WORKDIR /nakama
 COPY . .
