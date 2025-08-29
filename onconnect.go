@@ -13,37 +13,51 @@ import (
 
 const (
 	GroupNamePrefix = "Group"
-	MaxGroupSize    = 10
+	MaxGroups		= 80
 	RetryCount      = 5
 	RetryDelay      = 100 * time.Millisecond
 	LockCollection  = "locks"
 	JoinLockKey     = "join_lock"
+	GroupSizeKey     = "max_group_size"
+    NextGroupKey     = "next_group"
 	StreamMode = 2
+	AdminID = "319e1542-46ed-42fa-aa71-3d26dc6c976e"
 )
 
-type Player struct {
-    group string `json:"group"`
-    items map[string]interface{} `json:"items"`
-}
-
-type GroupMeta struct {
-	items map[string]interface{} `json:"items"`
-}
-
 //
-// --- Player Helpers ---
+// --- Read/Write in storage ---
 //
 
-func getPlayer(ctx context.Context, nk runtime.NakamaModule, userID string) (*Player, error) {
-    acc, err := nk.AccountGetId(ctx, userID)
-    if err != nil {
-        return nil, err
+func readInt(nk runtime.NakamaModule, key string, defaultVal int) int {
+    records, err := nk.StorageRead(context.Background(), []*runtime.StorageRead{{
+        Collection: LockCollection,
+        Key:        key,
+        UserID:     "",
+    }})
+    if err != nil || len(records) == 0 {
+        return defaultVal
     }
-    var p Player
-    if acc.User.Metadata != "" {
-		_ = json.Unmarshal([]byte(acc.User.Metadata), &p)
-	}
-    return &p, nil
+
+    var val map[string]int
+    if err := json.Unmarshal([]byte(records[0].Value), &val); err != nil {
+        return defaultVal
+    }
+    return val["value"]
+}
+
+func writeInt(nk runtime.NakamaModule, key string, value int) {
+    val, _ := json.Marshal(map[string]int{"value": value})
+    _, err := nk.StorageWrite(context.Background(), []*runtime.StorageWrite{{
+        Collection:     LockCollection,
+        Key:            key,
+        Value:          string(val),
+        UserID:         "",
+        PermissionRead: 2,
+        PermissionWrite: 2,
+    }})
+    if err != nil {
+        fmt.Printf("Failed to write %s: %v\n", key, err)
+    }
 }
 
 //
@@ -62,19 +76,6 @@ func rpcJoinGroup(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
         return "", err
     }
 
-	// update player metadata
-    p, err := getPlayer(ctx, nk, userID)
-    if err != nil {
-        return "", err
-    }
-	if p != nil {
-		if err := nk.AccountUpdateId(ctx, userID, "", map[string]interface{}{
-			"group": groupName,
-		}, "", "", "", "", ""); err != nil {
-			return "", err
-		}
-	}
-
     return `{"ok":true}`, nil
 }
 
@@ -90,13 +91,17 @@ func sendGroupData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
         return "", runtime.NewError("missing data field", 3)
     }
 
-    p, err := getPlayer(ctx, nk, userID)
-    if err != nil {
-        return "", err
-    }
-    if p.group == "" {
-        return `{"ok":false}`, nil
-    }
+	groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
+	if err != nil {
+		logger.WithField("user", userID).WithField("err", err).Error("Failed to fetch user groups")
+		return "", err
+	}
+
+	if len(groups) == 0 {
+		return `{"ok":false}`, nil
+	}
+
+	group := groups[0]
 
     msgBytes, _ := json.Marshal(map[string]interface{}{
         "user_id":    userID,
@@ -104,8 +109,8 @@ func sendGroupData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
         "from_group": true,
     })
 
-    if err := nk.StreamSend(StreamMode, "", "", p.group, string(msgBytes), nil, true); err != nil {
-        logger.WithField("group", p.group).WithField("err", err).Error("Failed to send to group stream")
+    if err := nk.StreamSend(StreamMode, "", "", group.GetGroup().Name, string(msgBytes), nil, true); err != nil {
+        logger.WithField("group", group.GetGroup().Id).WithField("err", err).Error("Failed to send to group stream")
         return "", err
     }
 
@@ -118,67 +123,53 @@ func sendGroupData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 
 func acquireLock(nk runtime.NakamaModule, key, userID string) bool {
 	for attempt := 1; attempt <= RetryCount; attempt++ {
-		records, err := nk.StorageRead(context.Background(), []*runtime.StorageRead{{
-			Collection: LockCollection,
-			Key:        key,
-			UserID:     "",
-		}})
+		// Try to read current lock state
+		records, err := nk.StorageRead(context.Background(), []*runtime.StorageRead{
+			{
+				Collection: LockCollection,
+				Key:        key,
+				UserID:     "",
+			},
+		})
 		if err != nil {
 			return false
 		}
 
+		// If record exists and is locked, retry after delay
 		if len(records) > 0 && string(records[0].Value) == `{"locked":true}` {
 			time.Sleep(RetryDelay)
-		} else {
-			val, _ := json.Marshal(map[string]interface{}{"locked": true})
-			_, err := nk.StorageWrite(context.Background(), []*runtime.StorageWrite{{
-				Collection: LockCollection,
-				Key:        key,
-				Value:      string(val),
-				UserID:     "",
-				PermissionRead:  2, // public
-    			PermissionWrite: 2, // public
-			}})
-			return err == nil
+			continue
 		}
+
+		// Otherwise, write lock = true
+		val, _ := json.Marshal(map[string]interface{}{"locked": true})
+		_, err = nk.StorageWrite(context.Background(), []*runtime.StorageWrite{
+			{
+				Collection:     LockCollection,
+				Key:            key,
+				Value:          string(val),
+				UserID:         "",
+				PermissionRead: 2, // public
+				PermissionWrite: 2, // public
+			},
+		})
+		return err == nil
 	}
 	return false
 }
 
 func releaseLock(nk runtime.NakamaModule, key, userID string) {
 	val, _ := json.Marshal(map[string]interface{}{"locked": false})
-	_, _ = nk.StorageWrite(context.Background(), []*runtime.StorageWrite{{
-		Collection: LockCollection,
-		Key:        key,
-		Value:      string(val),
-		UserID:     "",
-		PermissionRead:  2, // public
-    	PermissionWrite: 2, // public
-	}})
-}
-
-//
-// --- Group Helpers ---
-//
-
-func createGroup(nk runtime.NakamaModule, userID string, name string, logger runtime.Logger) (*api.Group, error) {
-	group, err := nk.GroupCreate(context.Background(), userID, name, "", "", "", "", true, map[string]interface{}{}, MaxGroupSize)
-	if err != nil {
-		return nil, err
-	}
-	logger.Info("Created group: %s", group.Id)
-	return group, nil
-}
-
-func getGroups(nk runtime.NakamaModule, logger runtime.Logger) ([]*api.Group, error) {
-	members := 10
-	open := true
-	groups, _, err := nk.GroupsList(context.Background(), "", "", &members, &open, 100, "")
-	if err != nil {
-		return nil, err
-	}
-	logger.Info("Fetched %d matching groups", len(groups))
-	return groups, nil
+	_, _ = nk.StorageWrite(context.Background(), []*runtime.StorageWrite{
+		{
+			Collection:     LockCollection,
+			Key:            key,
+			Value:          string(val),
+			UserID:         "",
+			PermissionRead: 2, // public
+			PermissionWrite: 2, // public
+		},
+	})
 }
 
 //
@@ -186,44 +177,52 @@ func getGroups(nk runtime.NakamaModule, logger runtime.Logger) ([]*api.Group, er
 //
 
 func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID string, sessionID string, logger runtime.Logger) {
-	member_state := 2
-	if !acquireLock(nk, JoinLockKey, userID) {
-		logger.Error("Could not acquire join lock for user %s", userID)
-		return
-	}
-	defer releaseLock(nk, JoinLockKey, userID)
+    // Acquire lock so only one joiner mutates shared state at a time
+    if !acquireLock(nk, JoinLockKey, userID) {
+        logger.Error("Could not acquire join lock for user %s", userID)
+        return
+    }
+    defer releaseLock(nk, JoinLockKey, userID)
 
-	groups, err := getGroups(nk, logger)
-	if err != nil {
-		logger.Error("Error fetching groups: %v", err)
-		return
-	}
+    // List all available groups
+    maxmembers := 100
+    open := true
+    groups, _, err := nk.GroupsList(ctx, "", "", &maxmembers, &open, 80, "")
+    if err != nil {
+        logger.Error("Error fetching groups: %v", err)
+        return
+    }
 
-	if len(groups) == 0 {
-		g, err := createGroup(nk, userID, fmt.Sprintf("%s_%d", GroupNamePrefix, 1), logger)
-		if err == nil {
-			_ = nk.GroupUsersAdd(context.Background(), "", g.Id, []string{userID})
-			nk.StreamUserJoin(StreamMode, "", "", g.Name, userID, sessionID, false, false, "")
-		}else{
-			logger.Error("Error creating group: %v", err)
-		}
-		return
-	}
+    // Load state from storage
+    maxGroupSize := readInt(nk, GroupSizeKey, 6)
+    nextGroup := readInt(nk, NextGroupKey, 0)
 
-	lastGroup := groups[len(groups)-1]
-	members, _, _ := nk.GroupUsersList(context.Background(), lastGroup.Id, 100, &member_state, "")
+    logger.Info("Loaded MaxGroupSize=%d, NextGroup=%d from storage", maxGroupSize, nextGroup)
 
-	if len(members) + 1 >= MaxGroupSize {
-		g, err := createGroup(nk, userID, fmt.Sprintf("%s_%d", GroupNamePrefix, len(groups)+1), logger)
-		if err != nil {
-			return
-		}
-		_ = nk.GroupUsersAdd(context.Background(), "", g.Id, []string{userID})
-		nk.StreamUserJoin(StreamMode, "", "", g.Name, userID, sessionID, false, false, "")
-	} else {
-		_ = nk.GroupUsersAdd(context.Background(), "", lastGroup.Id, []string{userID})
-		nk.StreamUserJoin(StreamMode, "", "", lastGroup.Name, userID, sessionID, false, false, "")
-	}
+    // Look at current group occupancy
+    memberState := 2 // member
+    members, _, _ := nk.GroupUsersList(ctx, groups[nextGroup].Id, 100, &memberState, "")
+
+    if len(members)+1 > maxGroupSize {
+        // Increase capacity proportionally
+        maxGroupSize = maxGroupSize + (nextGroup+1)/MaxGroups
+        writeInt(nk, GroupSizeKey, maxGroupSize)
+
+        // Move to next group (round-robin)
+        nextGroup = (nextGroup + 1) % MaxGroups
+        writeInt(nk, NextGroupKey, nextGroup)
+    }
+
+    // Add player to chosen group
+    if err := nk.GroupUsersAdd(ctx, "", groups[nextGroup].Id, []string{userID}); err != nil {
+        logger.Error("Failed to add user %s to group %s: %v", userID, groups[nextGroup].Name, err)
+        return
+    }
+
+    // Join stream for that group
+    if _, err := nk.StreamUserJoin(StreamMode, "", "", groups[nextGroup].Name, userID, sessionID, false, false, ""); err != nil {
+        logger.Error("Failed stream join for user %s: %v", userID, err)
+    }
 }
 
 //
@@ -231,11 +230,45 @@ func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID strin
 //
 
 func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
+	members := 100
+	open := true
+	groups, _, err := nk.GroupsList(context.Background(), "", "", &members, &open, 100, "")
+	if err != nil {
+		return err
+	}
+
+	// If no groups found, create MaxGroups
+    if len(groups) == 0 {
+        logger.Info("No groups found, creating groups...")
+        for i := 1; i <= MaxGroups; i++ {
+            name := fmt.Sprintf("%s_%d", GroupNamePrefix, i)
+            _, err := nk.GroupCreate(context.Background(), AdminID, name, "", "", "", "", true, map[string]interface{}{
+				"items": map[string]interface{}{"test": "test",},
+            }, 100)
+            if err != nil {
+                logger.Error("Failed to create group %s: %v", name, err)
+                return err
+            }
+        }
+    }
+
 	if err := initializer.RegisterEventSessionStart(
         func(ctx context.Context, logger runtime.Logger, evt *api.Event) {
             userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
 			sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
-            handlePlayerJoin(ctx, nk, userID, sessionID, logger)
+			groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
+			if err != nil {
+				return
+			}
+			if len(groups) != 0 {
+				group := groups[0]
+				if _, err := nk.StreamUserJoin(StreamMode, "", "", group.GetGroup().Name, userID, sessionID, false, false, ""); err != nil {
+					logger.Error("Failed stream join for user %s: %v", userID, err)
+					return
+				}
+			}else{
+				handlePlayerJoin(ctx, nk, userID, sessionID, logger)
+			}
         },
     ); err != nil {
         return err

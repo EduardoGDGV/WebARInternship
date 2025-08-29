@@ -143,7 +143,7 @@ async function cleanupBots() {
         await b.socket.rpc("rpcLeaveCell", JSON.stringify({ lat : n.lat, lon : n.lon }));
       } catch {}
     }
-    try { await client.deleteAccount(b.session); } catch {}
+    //try { await client.deleteAccount(b.session); } catch {}
   }
 
   console.log("All bots cleaned up");
