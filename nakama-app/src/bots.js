@@ -2,7 +2,7 @@ import { Client } from "@heroiclabs/nakama-js";
 
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 const NUM_BOTS = 800;          // total number of bots
-const BATCH_SIZE = 100;         // spawn this many bots at a time
+const BATCH_SIZE = 100;        // spawn this many bots at a time
 const bots = [];
 const CELL_SIZE = 0.002;       // cell size for RPC joins
 
@@ -43,21 +43,34 @@ async function createBot(i) {
 
     const account = await client.getAccount(session);
     const user = account.user;
+
+    // Metadata might come as a JSON string
     const metadata = typeof user.metadata === "string"
       ? JSON.parse(user.metadata)
-      : user.metadata;
-    const myGroup = metadata.group
+      : user.metadata || {};
+
+    const myGroup = metadata.group || { id: null, name: "NoGroup" };
 
     let lat = 37.7749 + (Math.random() - 0.5) * 0.02;
     let lon = -122.4194 + (Math.random() - 0.5) * 0.02;
     let cell = getCell(lat, lon);
     let neighbors = getNeighborCells(cell);
+
     for (const n of neighbors) {
       try {
-        await socket.rpc("rpcjoincell", JSON.stringify({ lat : n.lat, lon : n.lon }));
+        await socket.rpc("rpcjoincell", JSON.stringify({ lat: n.lat, lon: n.lon }));
       } catch {}
     }
     console.log(`Bot ${i} joined neighborhood around`, cell);
+
+    // Register notification listener ONCE
+    socket.onnotification = async (notification) => {
+      if (notification.subject === "buildings_update") {
+        try {
+          await socket.rpc("get_buildings", "{}");
+        } catch {}
+      }
+    };
 
     const interval = setInterval(async () => {
       if (cleaningUp) return; // stop sending updates if cleaning
@@ -68,26 +81,24 @@ async function createBot(i) {
       const newCell = getCell(lat, lon);
       if (newCell.cellLat !== cell.cellLat || newCell.cellLon !== cell.cellLon) {
         try {
-          // detect movement direction
           const dLat = Math.sign(newCell.cellLat - cell.cellLat);
           const dLon = Math.sign(newCell.cellLon - cell.cellLon);
 
-          // leave 3 cells behind and join the 3 in front
           if (dLat !== 0) {
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon - CELL_SIZE }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - dLat * CELL_SIZE, lon : cell.cellLon + CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon - CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + dLat * CELL_SIZE, lon : newCell.cellLon + CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - dLat * CELL_SIZE, lon: cell.cellLon - CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - dLat * CELL_SIZE, lon: cell.cellLon }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - dLat * CELL_SIZE, lon: cell.cellLon + CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + dLat * CELL_SIZE, lon: newCell.cellLon - CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + dLat * CELL_SIZE, lon: newCell.cellLon }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + dLat * CELL_SIZE, lon: newCell.cellLon + CELL_SIZE }));
           }
           if (dLon !== 0) {
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat - CELL_SIZE, lon : cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat, lon : cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat : cell.cellLat + CELL_SIZE, lon : cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat - CELL_SIZE, lon : newCell.cellLon + dLon * CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat, lon : newCell.cellLon + dLon * CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat : newCell.cellLat + CELL_SIZE, lon : newCell.cellLon + dLon * CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - CELL_SIZE, lon: cell.cellLon - dLon * CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat, lon: cell.cellLon - dLon * CELL_SIZE }));
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat + CELL_SIZE, lon: cell.cellLon - dLon * CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat - CELL_SIZE, lon: newCell.cellLon + dLon * CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat, lon: newCell.cellLon + dLon * CELL_SIZE }));
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + CELL_SIZE, lon: newCell.cellLon + dLon * CELL_SIZE }));
           }
           cell = newCell;
         } catch (e) {
@@ -98,17 +109,16 @@ async function createBot(i) {
       try {
         await socket.rpc(
           "rpcsendlocation",
-          JSON.stringify({ lat: cell.cellLat, lon: cell.cellLon, data: { lat, lon }, group: myGroup.name, })
+          JSON.stringify({
+            lat: cell.cellLat,
+            lon: cell.cellLon,
+            data: { lat, lon },
+            group: myGroup.name,
+          })
         );
       } catch (e) {
         console.error(`Bot ${i} failed sending position`, e);
       }
-      // Listen for notifications
-      socket.onnotification = async (notification) => {
-        if (notification.subject === "buildings_update") {
-          const result = await socket.rpc("get_buildings", "{}");
-        }
-      };
     }, 1000);
 
     bots.push({ session, socket, interval, lat, lon, cell });
@@ -126,7 +136,7 @@ async function spawnBots() {
     }
     await Promise.all(promises);
     console.log(`Batch ${i / BATCH_SIZE + 1} spawned`);
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
   }
 }
 
@@ -142,15 +152,17 @@ async function cleanupBots() {
     clearInterval(b.interval);
   }
 
-  // Leave neighborhoods, disconnect sockets, delete accounts
+  // Leave neighborhoods & close sockets
   for (const b of bots) {
     let neighbors = getNeighborCells(b.cell);
     for (const n of neighbors) {
       try {
-        await b.socket.rpc("rpcLeaveCell", JSON.stringify({ lat : n.lat, lon : n.lon }));
+        await b.socket.rpc("rpcleavecell", JSON.stringify({ lat: n.lat, lon: n.lon }));
       } catch {}
     }
-    //try { await client.deleteAccount(b.session); } catch {}
+    try { b.socket.close(); } catch {}
+    // Optional but heavy: delete account
+    // try { await client.deleteAccount(b.session); } catch {}
   }
 
   console.log("All bots cleaned up");
@@ -158,7 +170,7 @@ async function cleanupBots() {
 }
 
 // --- Handle Ctrl+C ---
-process.on('SIGINT', async () => {
+process.on("SIGINT", async () => {
   await cleanupBots();
 });
 
@@ -166,7 +178,7 @@ process.on('SIGINT', async () => {
 (async () => {
   await spawnBots();
 
-  // Auto-cleanup after 30s
+  // Auto-cleanup after 60s
   setTimeout(async () => {
     await cleanupBots();
   }, 60000);
