@@ -6,6 +6,7 @@ let session = null;
 let socket = null;
 let markers = {}; // { playerId: { marker, lastUpdate } }
 let myMarker = null;
+let myGroup = null;
 let buildingMarkers = [];
 const CELL_SIZE = 0.002; // ~200m
 
@@ -124,7 +125,7 @@ function setupStreamHandlers(map) {
       return;
     }
 
-    const icon = msg.from_group ? blueIcon : redIcon;
+    const icon = msg.group ? blueIcon : redIcon;
     const now = Date.now();
 
     if (markers[playerId]) {
@@ -220,6 +221,7 @@ function startPositionUpdates(map, currentCell, lat, lon) {
         lat: currentCell.cellLat,
         lon: currentCell.cellLon,
         data: { lat, lon },
+        group: myGroup.name,
       })
     );
   }, 1000);
@@ -242,5 +244,14 @@ export async function initMap(mapDivId) {
   }
 
   setupStreamHandlers(map);
+
+  // get the user's group
+  const account = await client.getAccount(session);
+  const user = account.user;
+  // parse metadata
+  const metadata = typeof user.metadata === "string"
+    ? JSON.parse(user.metadata)
+    : user.metadata;
+  myGroup = metadata.group;
   startPositionUpdates(map, currentCell, 37.7749, -122.4194);
 }

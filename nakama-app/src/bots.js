@@ -41,6 +41,13 @@ async function createBot(i) {
     const socket = client.createSocket();
     await socket.connect(session, true);
 
+    const account = await client.getAccount(session);
+    const user = account.user;
+    const metadata = typeof user.metadata === "string"
+      ? JSON.parse(user.metadata)
+      : user.metadata;
+    const myGroup = metadata.group
+
     let lat = 37.7749 + (Math.random() - 0.5) * 0.02;
     let lon = -122.4194 + (Math.random() - 0.5) * 0.02;
     let cell = getCell(lat, lon);
@@ -91,7 +98,7 @@ async function createBot(i) {
       try {
         await socket.rpc(
           "rpcsendlocation",
-          JSON.stringify({ lat: cell.cellLat, lon: cell.cellLon, data: { lat, lon } })
+          JSON.stringify({ lat: cell.cellLat, lon: cell.cellLon, data: { lat, lon }, group: myGroup.name, })
         );
       } catch (e) {
         console.error(`Bot ${i} failed sending position`, e);

@@ -79,44 +79,6 @@ func rpcJoinGroup(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
     return `{"ok":true}`, nil
 }
 
-func sendGroupData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-    userID := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-
-    var payloadMap map[string]interface{}
-    if err := json.Unmarshal([]byte(payload), &payloadMap); err != nil {
-        return "", runtime.NewError("invalid payload", 3)
-    }
-    data, ok := payloadMap["data"]
-    if !ok {
-        return "", runtime.NewError("missing data field", 3)
-    }
-
-	groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
-	if err != nil {
-		logger.WithField("user", userID).WithField("err", err).Error("Failed to fetch user groups")
-		return "", err
-	}
-
-	if len(groups) == 0 {
-		return `{"ok":false}`, nil
-	}
-
-	group := groups[0]
-
-    msgBytes, _ := json.Marshal(map[string]interface{}{
-        "user_id":    userID,
-        "data":       data,
-        "from_group": true,
-    })
-
-    if err := nk.StreamSend(StreamMode, "", "", group.GetGroup().Name, string(msgBytes), nil, true); err != nil {
-        logger.WithField("group", group.GetGroup().Id).WithField("err", err).Error("Failed to send to group stream")
-        return "", err
-    }
-
-    return `{"ok":true}`, nil
-}
-
 //
 // --- Lock Helpers ---
 //
@@ -222,6 +184,17 @@ func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID strin
     // Join stream for that group
     if _, err := nk.StreamUserJoin(StreamMode, "", "", groups[nextGroup].Name, userID, sessionID, false, false, ""); err != nil {
         logger.Error("Failed stream join for user %s: %v", userID, err)
+    }
+
+    groupdata := map[string]interface{}{
+        "group": map[string]interface{}{
+            "id": groups[nextGroup].Id,
+            "name": groups[nextGroup].Name,
+        },
+    }
+
+    if err := nk.AccountUpdateId(ctx, userID, "", groupdata, "", "", "", "", ""); err != nil {
+        logger.WithField("err", err).Error("Account update error.")
     }
 }
 

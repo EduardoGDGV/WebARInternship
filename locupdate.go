@@ -70,7 +70,7 @@ func sendCellData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
     msgBytes, err := json.Marshal(map[string]interface{}{
         "user_id": userID,
         "data":    data,
-		"from_group": false,
+		"group":   nil,
     })
     if err != nil {
         return "", fmt.Errorf("failed to marshal message: %w", err)
@@ -80,6 +80,41 @@ func sendCellData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk run
     cellLabel := fmt.Sprintf("cell_%f_%f", lat, lon)
     if err := nk.StreamSend(StreamMode, "", "", cellLabel, string(msgBytes), nil, true); err != nil {
         return "", fmt.Errorf("failed to send to cell stream: %w", err)
+    }
+
+    return `{"ok":true}`, nil
+}
+
+func sendGroupData(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+    userID := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+
+    var payloadMap map[string]interface{}
+    if err := json.Unmarshal([]byte(payload), &payloadMap); err != nil {
+        return "", runtime.NewError("invalid payload", 3)
+    }
+    data, ok := payloadMap["data"]
+    if !ok {
+        return "", runtime.NewError("missing data field", 3)
+    }
+    groupVal, ok := payloadMap["group"]
+    if !ok {
+        return "", runtime.NewError("missing data field", 3)
+    }
+
+	group, ok := groupVal.(string)
+    if !ok || group == "" {
+        return "", runtime.NewError("group must be a string", 3)
+    }
+
+    msgBytes, _ := json.Marshal(map[string]interface{}{
+        "user_id":    userID,
+        "data":       data,
+        "group":      group,
+    })
+
+    if err := nk.StreamSend(StreamMode, "", "", group, string(msgBytes), nil, true); err != nil {
+        logger.WithField("group", group).WithField("err", err).Error("Failed to send to group stream")
+        return "", err
     }
 
     return `{"ok":true}`, nil
