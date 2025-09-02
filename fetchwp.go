@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strconv"
 	"fmt"
     "time"
 	"io/ioutil"
@@ -71,7 +72,7 @@ func fetchBuildingsFromWP(logger runtime.Logger) ([]Building, error) {
 
 	body, _ := ioutil.ReadAll(resp.Body)
 
-	// 🚨 Log status and raw body for debugging
+	// Log status and raw body for debugging
 	logger.Info("WP response status: %d", resp.StatusCode)
 	logger.Info("WP raw body: %s", string(body))
 
@@ -116,35 +117,92 @@ func fetchBuildingsFromWP(logger runtime.Logger) ([]Building, error) {
 
 // RPC called by WordPress to push updates
 func rpcWpPushBuilding(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	var b Building
-	if err := json.Unmarshal([]byte(payload), &b); err != nil {
-		logger.Error("Failed to parse building payload: %v", err)
-		return "", err
-	}
+    logger.Error("PAYLOAD: %s", payload)
 
-	value, _ := json.Marshal(b)
-	record := &runtime.StorageWrite{
-		Collection: "buildings",
-		Key:        fmt.Sprintf("%d", b.ID),
-        UserID:     "",
-		Value:      string(value),
-	}
+    // Parse payload
+    var data struct {
+        ID     int     `json:"id"`
+        Lat    string  `json:"lat,omitempty"`
+        Lon    string  `json:"lon,omitempty"`
+        Image  string  `json:"image,omitempty"`
+        Title  string  `json:"title,omitempty"`
+        Status string  `json:"status,omitempty"`
+    }
+    if err := json.Unmarshal([]byte(payload), &data); err != nil {
+        logger.Error("Failed to parse building payload: %v", err)
+        return "", err
+    }
 
-	if _, err := nk.StorageWrite(ctx, []*runtime.StorageWrite{record}); err != nil {
-		logger.Error("Failed to write building to storage: %v", err)
-		return "", err
-	}
+    key := fmt.Sprintf("%d", data.ID)
 
-	// Notify clients
-	content := map[string]interface{}{
-		"type": "building_update",
-		"data": b,
-	}
-	if err := nk.NotificationSend(ctx, "", "building_update", content, 1, "", true); err != nil {
-		logger.Error("Failed to send notification: %v", err)
-	}
+    switch data.Status {
+    case "delete", "trash":
+        // Remove from storage
+        err := nk.StorageDelete(ctx, []*runtime.StorageDelete{
+            {Collection: "buildings", Key: key, UserID: ""},
+        })
+        if err != nil {
+            logger.Error("Failed to delete building from storage: %v", err)
+            return "", err
+        }
 
-	return `{"success":true}`, nil
+        // Notify clients
+        content := map[string]interface{}{"data": map[string]interface{}{"id": data.ID}}
+        if err := nk.NotificationSendAll(ctx, "building_delete", content, 1, false); err != nil {
+            logger.Error("Failed to send delete notification: %v", err)
+        }
+
+    case "update", "publish":
+        // Convert Lat/Lon to float
+        var latF, lonF float64
+        if data.Lat != "" {
+            if v, err := strconv.ParseFloat(data.Lat, 64); err == nil {
+                latF = v
+            } else {
+                logger.Error("Invalid lat value: %v", data.Lat)
+            }
+        }
+        if data.Lon != "" {
+            if v, err := strconv.ParseFloat(data.Lon, 64); err == nil {
+                lonF = v
+            } else {
+                logger.Error("Invalid lon value: %v", data.Lon)
+            }
+        }
+
+        // Save/update in storage
+        b := map[string]interface{}{
+            "id":    data.ID,
+            "lat":   latF,
+            "lon":   lonF,
+            "image": data.Image,
+            "title": data.Title,
+            "status": data.Status,
+        }
+        val, _ := json.Marshal(b)
+        record := &runtime.StorageWrite{
+            Collection: "buildings",
+            Key:        key,
+            UserID:     "",
+            Value:      string(val),
+        }
+        if _, err := nk.StorageWrite(ctx, []*runtime.StorageWrite{record}); err != nil {
+            logger.Error("Failed to write building to storage: %v", err)
+            return "", err
+        }
+
+        // Notify clients
+        content := map[string]interface{}{"data": b}
+        if err := nk.NotificationSendAll(ctx, "building_update", content, 1, false); err != nil {
+            logger.Error("Failed to send update notification: %v", err)
+        }
+
+    default:
+        logger.Error("Unknown status in payload: %v", data.Status)
+        return "", fmt.Errorf("unknown status: %s", data.Status)
+    }
+
+    return `{"success":true}`, nil
 }
 
 // RPC for clients to fetch all buildings from Nakama Storage

@@ -4,69 +4,71 @@ import L from "leaflet";
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 let session = null;
 let socket = null;
-let markers = {}; // { playerId: { marker, lastUpdate } }
+
+// --- Markers ---
+let buildingMarkers = []; // array of building markers with .options.buildingId
+let userMarkers = {}; // { cellKey: { playerId: { marker, lastUpdate } } }
 let myMarker = null;
 let myGroup = null;
-let buildingMarkers = [];
+
 const CELL_SIZE = 0.002; // ~200m
 
-var redIcon = new L.Icon({
+// --- Icons ---
+const redIcon = new L.Icon({
   iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png"
 });
-var blueIcon = new L.Icon({
+const blueIcon = new L.Icon({
   iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png"
 });
 
+// --- Buildings ---
 async function fetchBuildings() {
   if (!socket) throw new Error("Socket not initialized");
-
-  // Call the RPC we created in Nakama
   const result = await socket.rpc("get_buildings", "{}");
-  const buildings = JSON.parse(result.payload);
-  return buildings; // Array of {id, lat, lon, image}
+  return JSON.parse(result.payload);
 }
 
 async function addBuildingsToMap(map) {
   const buildings = await fetchBuildings();
 
-  // Clear previous markers if needed
-  buildingMarkers.forEach((m) => map.removeLayer(m));
+  // Remove old markers
+  buildingMarkers.forEach(m => map.removeLayer(m));
   buildingMarkers = [];
 
-  buildings.forEach((bld) => {
+  buildings.forEach(bld => {
     if (bld.lat != null && bld.lon != null) {
+      const lat = parseFloat(bld.lat);
+      const lon = parseFloat(bld.lon);
+      if (isNaN(lat) || isNaN(lon)) return;
+
       const icon = L.icon({
-        iconUrl: bld.image ? bld.image : "default.png",
+        iconUrl: bld.image || "default.png",
         iconSize: [40, 40],
       });
-      const marker = L.marker([bld.lat, bld.lon], { icon })
+
+      const marker = L.marker([lat, lon], { icon })
         .addTo(map)
-        .bindPopup(`<a href="${bld.link}" target="_blank">${bld.slug}</a>`);
+        .bindPopup(`<a href="${bld.link || '#'}" target="_blank">${bld.title || 'Building'}</a>`);
+
+      marker.options.buildingId = bld.id; // keep building ID for updates
       buildingMarkers.push(marker);
     }
   });
 }
 
+// --- Cells ---
 function getCell(lat, lon) {
   return {
-    cellLat: Math.floor(lat / CELL_SIZE) * CELL_SIZE,
-    cellLon: Math.floor(lon / CELL_SIZE) * CELL_SIZE,
+    lat: Math.floor(lat / CELL_SIZE) * CELL_SIZE,
+    lon: Math.floor(lon / CELL_SIZE) * CELL_SIZE,
   };
 }
 
-function getNeighborCells(cell) {
-  const neighbors = [];
-  for (let dLat = -1; dLat <= 1; dLat++) {
-    for (let dLon = -1; dLon <= 1; dLon++) {
-      neighbors.push({
-        lat: cell.cellLat + dLat * CELL_SIZE,
-        lon: cell.cellLon + dLon * CELL_SIZE,
-      });
-    }
-  }
-  return neighbors;
+function cellKey(cell) {
+  return `${cell.lat.toFixed(6)},${cell.lon.toFixed(6)}`;
 }
 
+// --- RPCs ---
 async function joinCell(lat, lon) {
   await socket.rpc("rpcjoincell", JSON.stringify({ lat, lon }));
 }
@@ -75,10 +77,9 @@ async function leaveCell(lat, lon) {
   await socket.rpc("rpcleavecell", JSON.stringify({ lat, lon }));
 }
 
-/** Restore session from localStorage */
+// --- Session / Socket ---
 async function initSession() {
   if (session) return session;
-
   const sessionObj = JSON.parse(localStorage.getItem("session"));
   if (!sessionObj) return (window.location.href = "index.html");
 
@@ -91,11 +92,9 @@ async function initSession() {
     sessionObj.user_id,
     sessionObj.username
   );
-
   return session;
 }
 
-/** Connect socket */
 async function initSocket() {
   socket = client.createSocket();
   await socket.connect(session, true);
@@ -103,155 +102,175 @@ async function initSocket() {
   return socket;
 }
 
-/** Setup map */
+// --- Leaflet Map ---
 function initLeaflet(mapDivId, lat = 37.7749, lon = -122.4194) {
-  const map = L.map(mapDivId).setView([lat, lon], 13);
+  const map = L.map(mapDivId).setView([lat, lon], 15);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
-
   myMarker = L.marker([lat, lon]).addTo(map).bindPopup("You");
   return map;
 }
 
-/** Handle stream events */
+// --- Stream Handlers ---
 function setupStreamHandlers(map) {
+  // Player position updates
   socket.onstreamdata = (streamData) => {
     const msg = JSON.parse(streamData.data);
     const playerId = msg.user_id;
-    const pos = msg.data;
+    if (playerId === session.user_id) return;
 
-    if (playerId === session.user_id) {
-      // keep map centered on me
-      //map.setView([myMarker.getLatLng().lat, myMarker.getLatLng().lng]);
+    const pos = msg.data;
+    const cell = getCell(msg.lat, msg.lon);
+    const cKey = cellKey(cell);
+
+    const myPos = myMarker.getLatLng();
+    const d = map.distance([pos.lat, pos.lon], [myPos.lat, myPos.lng]);
+
+    let icon = redIcon;
+    if (msg.group) icon = blueIcon;
+    else if (d > CELL_SIZE * 111000) {
+      if (userMarkers[cKey] && userMarkers[cKey][playerId]) {
+        map.removeLayer(userMarkers[cKey][playerId].marker);
+        delete userMarkers[cKey][playerId];
+      }
       return;
     }
 
-    const icon = msg.group ? blueIcon : redIcon;
-    const now = Date.now();
+    if (!userMarkers[cKey]) userMarkers[cKey] = {};
 
-    if (markers[playerId]) {
-      // update existing marker if last update is older than 500ms
-      markers[playerId].marker.setIcon(icon);
-      if (now - markers[playerId].lastUpdate > 500) {
-        markers[playerId].marker.setLatLng([pos.lat, pos.lon]);
-        markers[playerId].lastUpdate = now;
-      }
+    if (userMarkers[cKey][playerId]) {
+      userMarkers[cKey][playerId].marker.setIcon(icon);
+      userMarkers[cKey][playerId].marker.setLatLng([pos.lat, pos.lon]);
+      userMarkers[cKey][playerId].lastUpdate = Date.now();
     } else {
-      // create new marker
       const marker = L.marker([pos.lat, pos.lon], { icon })
         .addTo(map)
         .bindPopup(`Player: ${playerId}`);
-      markers[playerId] = { marker, lastUpdate: Date.now() };
+      marker.options.playerId = playerId;
+      userMarkers[cKey][playerId] = { marker, lastUpdate: Date.now() };
     }
   };
 
-  socket.onstreampresence = (presence) => {
-    presence.leaves.forEach((leave) => {
-      const playerId = leave.user_id;
-      if (markers[playerId]) {
-        map.removeLayer(markers[playerId].marker);
-        delete markers[playerId];
-      }
-    });
-  };
-
-  // Listen for notifications
+  // Building updates
   socket.onnotification = (notification) => {
-    console.log("Received notification:", notification);
-    if (notification.subject === "buildings_update") {
-        console.log("Refreshing buildings...");
-        addBuildingsToMap(map); // re-fetch RPC data
-    }
-  };
+    const payload = notification.content;
 
-  // Periodic cleanup
-  setInterval(() => {
-    const now = Date.now();
-    for (const playerId in markers) {
-      if (now - markers[playerId].lastUpdate > 2000) {
-        map.removeLayer(markers[playerId].marker);
-        delete markers[playerId];
+    if (notification.subject === "building_update") {
+      const bld = payload.data;
+      const lat = parseFloat(bld.lat);
+      const lon = parseFloat(bld.lon);
+      if (isNaN(lat) || isNaN(lon)) return;
+
+      const existing = buildingMarkers.find(m => m.options.buildingId === bld.id);
+      if (existing) {
+        existing.setLatLng([lat, lon]);
+        if (bld.image) existing.setIcon(L.icon({ iconUrl: bld.image, iconSize: [40, 40] }));
+      } else {
+        const marker = L.marker([lat, lon], {
+          icon: L.icon({ iconUrl: bld.image || "default.png", iconSize: [40, 40] })
+        }).addTo(map)
+          .bindPopup(`<a href="${bld.link || '#'}" target="_blank">${bld.title || 'Building'}</a>`);
+        marker.options.buildingId = bld.id;
+        buildingMarkers.push(marker);
       }
     }
-  }, 500);
+
+    if (notification.subject === "building_delete") {
+      const bld = payload.data;
+      const index = buildingMarkers.findIndex(m => m.options.buildingId === bld.id);
+      if (index !== -1) {
+        map.removeLayer(buildingMarkers[index]);
+        buildingMarkers.splice(index, 1);
+      }
+    }
+
+    if (notification.subject === "buildings_update") {
+      // Refresh all buildings
+      addBuildingsToMap(map).catch(err => console.error("Failed to refresh buildings:", err));
+    }
+  };
 }
 
-/** Position update loop with optimized neighborhood change */
+// --- Position Updates ---
+function determineStreams(lat, lon, cell) {
+  const offsetLat = lat - cell.lat;
+  const offsetLon = lon - cell.lon;
+  const streams = [{ lat: cell.lat, lon: cell.lon }];
+
+  if (offsetLat > 0) streams.push({ lat: cell.lat + CELL_SIZE, lon: cell.lon });
+  else if (offsetLat < 0) streams.push({ lat: cell.lat - CELL_SIZE, lon: cell.lon });
+  if (offsetLon > 0) streams.push({ lat: cell.lat, lon: cell.lon + CELL_SIZE });
+  else if (offsetLon < 0) streams.push({ lat: cell.lat, lon: cell.lon - CELL_SIZE });
+
+  if (offsetLat !== 0 && offsetLon !== 0) {
+    streams.push({
+      lat: cell.lat + (offsetLat > 0 ? CELL_SIZE : -CELL_SIZE),
+      lon: cell.lon + (offsetLon > 0 ? CELL_SIZE : -CELL_SIZE)
+    });
+  }
+
+  return streams.slice(0, 4);
+}
+
 function startPositionUpdates(map, currentCell, lat, lon) {
+  let activeStreams = new Set();
+
   setInterval(async () => {
-    // random walk (demo only)
     lat += (Math.random() - 0.5) * 0.001;
     lon += (Math.random() - 0.5) * 0.001;
     myMarker.setLatLng([lat, lon]);
 
     const newCell = getCell(lat, lon);
+    const needed = determineStreams(lat, lon, newCell);
 
-    if (
-      newCell.cellLat !== currentCell.cellLat ||
-      newCell.cellLon !== currentCell.cellLon
-    ) {
-      const dLat = Math.sign(newCell.cellLat - currentCell.cellLat);
-      const dLon = Math.sign(newCell.cellLon - currentCell.cellLon);
-
-      // leave 3 cells behind and join 3 in front
-      if (dLat !== 0) {
-        await leaveCell(currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon - CELL_SIZE);
-        await leaveCell(currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon);
-        await leaveCell(currentCell.cellLat - dLat * CELL_SIZE, currentCell.cellLon + CELL_SIZE);
-
-        await joinCell(newCell.cellLat + dLat * CELL_SIZE, newCell.cellLon - CELL_SIZE);
-        await joinCell(newCell.cellLat + dLat * CELL_SIZE, newCell.cellLon);
-        await joinCell(newCell.cellLat + dLat * CELL_SIZE, newCell.cellLon + CELL_SIZE);
+    for (const c of needed) {
+      const key = cellKey(c);
+      if (!activeStreams.has(key)) {
+        await joinCell(c.lat, c.lon);
+        activeStreams.add(key);
       }
-      if (dLon !== 0) {
-        await leaveCell(currentCell.cellLat - CELL_SIZE, currentCell.cellLon - dLon * CELL_SIZE);
-        await leaveCell(currentCell.cellLat, currentCell.cellLon - dLon * CELL_SIZE);
-        await leaveCell(currentCell.cellLat + CELL_SIZE, currentCell.cellLon - dLon * CELL_SIZE);
-
-        await joinCell(newCell.cellLat - CELL_SIZE, newCell.cellLon + dLon * CELL_SIZE);
-        await joinCell(newCell.cellLat, newCell.cellLon + dLon * CELL_SIZE);
-        await joinCell(newCell.cellLat + CELL_SIZE, newCell.cellLon + dLon * CELL_SIZE);
-      }
-      currentCell = newCell;
     }
 
-    // send location
-    await socket.rpc(
-      "rpcsendlocation",
-      JSON.stringify({
-        lat: currentCell.cellLat,
-        lon: currentCell.cellLon,
-        data: { lat, lon },
-        group: myGroup.name,
-      })
-    );
+    for (const key of Array.from(activeStreams)) {
+      if (!needed.some(c => cellKey(c) === key)) {
+        const [clat, clon] = key.split(",").map(Number);
+        await leaveCell(clat, clon);
+        if (userMarkers[key]) {
+          for (const pid in userMarkers[key]) map.removeLayer(userMarkers[key][pid].marker);
+          delete userMarkers[key];
+        }
+        activeStreams.delete(key);
+      }
+    }
+
+    await socket.rpc("rpcsendlocation", JSON.stringify({
+      lat: newCell.lat,
+      lon: newCell.lon,
+      data: { lat, lon },
+      group: myGroup?.name
+    }));
+
+    currentCell = newCell;
   }, 1000);
 }
 
-/** Main entry */
+// --- Main ---
 export async function initMap(mapDivId) {
   await initSession();
   await initSocket();
-
   const map = initLeaflet(mapDivId);
-  // Fetch buildings once at start
   await addBuildingsToMap(map);
-  let currentCell = getCell(37.7749, -122.4194);
 
-  // join initial neighborhood
-  const neighbors = getNeighborCells(currentCell);
-  for (const c of neighbors) {
-    await joinCell(c.lat, c.lon);
-  }
+  let currentCell = getCell(37.7749, -122.4194);
+  const streams = determineStreams(37.7749, -122.4194, currentCell);
+
+  for (const c of streams) await joinCell(c.lat, c.lon);
 
   setupStreamHandlers(map);
 
-  // get the user's group
   const account = await client.getAccount(session);
   const user = account.user;
-  // parse metadata
-  const metadata = typeof user.metadata === "string"
-    ? JSON.parse(user.metadata)
-    : user.metadata;
+  const metadata = typeof user.metadata === "string" ? JSON.parse(user.metadata) : user.metadata;
   myGroup = metadata.group;
+
   startPositionUpdates(map, currentCell, 37.7749, -122.4194);
 }

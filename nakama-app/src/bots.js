@@ -16,17 +16,27 @@ function getCell(lat, lon) {
   };
 }
 
-function getNeighborCells(cell) {
-  const neighbors = [];
-  for (let dLat = -1; dLat <= 1; dLat++) {
-    for (let dLon = -1; dLon <= 1; dLon++) {
-      neighbors.push({
-        lat: cell.cellLat + dLat * CELL_SIZE,
-        lon: cell.cellLon + dLon * CELL_SIZE,
-      });
-    }
+function cellKey(c) {
+  return `${c.lat},${c.lon}`;
+}
+
+function determineStreams(lat, lon, cell) {
+  const offsetLat = lat - cell.cellLat;
+  const offsetLon = lon - cell.cellLon;
+  const streams = [{ lat: cell.cellLat, lon: cell.cellLon }];
+
+  if (offsetLat > 0) streams.push({ lat: cell.cellLat + CELL_SIZE, lon: cell.cellLon });
+  else if (offsetLat < 0) streams.push({ lat: cell.cellLat - CELL_SIZE, lon: cell.cellLon });
+
+  if (offsetLon > 0) streams.push({ lat: cell.cellLat, lon: cell.cellLon + CELL_SIZE });
+  else if (offsetLon < 0) streams.push({ lat: cell.cellLat, lon: cell.cellLon - CELL_SIZE });
+
+  if (offsetLat !== 0 && offsetLon !== 0) {
+    streams.push({ lat: cell.cellLat + (offsetLat > 0 ? CELL_SIZE : -CELL_SIZE),
+                  lon: cell.cellLon + (offsetLon > 0 ? CELL_SIZE : -CELL_SIZE) });
   }
-  return neighbors;
+
+  return streams.slice(0, 4); // max 4 streams
 }
 
 // --- Create a single bot ---
@@ -44,7 +54,6 @@ async function createBot(i) {
     const account = await client.getAccount(session);
     const user = account.user;
 
-    // Metadata might come as a JSON string
     const metadata = typeof user.metadata === "string"
       ? JSON.parse(user.metadata)
       : user.metadata || {};
@@ -54,14 +63,17 @@ async function createBot(i) {
     let lat = 37.7749 + (Math.random() - 0.5) * 0.02;
     let lon = -122.4194 + (Math.random() - 0.5) * 0.02;
     let cell = getCell(lat, lon);
-    let neighbors = getNeighborCells(cell);
+    let activeStreams = new Set();
 
-    for (const n of neighbors) {
+    // join initial streams
+    const initialStreams = determineStreams(lat, lon, cell);
+    for (const s of initialStreams) {
       try {
-        await socket.rpc("rpcjoincell", JSON.stringify({ lat: n.lat, lon: n.lon }));
+        await socket.rpc("rpcjoincell", JSON.stringify({ lat: s.lat, lon: s.lon }));
+        activeStreams.add(cellKey(s));
       } catch {}
     }
-    console.log(`Bot ${i} joined neighborhood around`, cell);
+    console.log(`Bot ${i} joined streams around`, cell);
 
     // Register notification listener ONCE
     socket.onnotification = async (notification) => {
@@ -73,45 +85,44 @@ async function createBot(i) {
     };
 
     const interval = setInterval(async () => {
-      if (cleaningUp) return; // stop sending updates if cleaning
+      if (cleaningUp) return;
 
+      // random walk
       lat += (Math.random() - 0.5) * 0.0002;
       lon += (Math.random() - 0.5) * 0.0002;
 
       const newCell = getCell(lat, lon);
-      if (newCell.cellLat !== cell.cellLat || newCell.cellLon !== cell.cellLon) {
-        try {
-          const dLat = Math.sign(newCell.cellLat - cell.cellLat);
-          const dLon = Math.sign(newCell.cellLon - cell.cellLon);
+      const needed = determineStreams(lat, lon, newCell);
 
-          if (dLat !== 0) {
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - dLat * CELL_SIZE, lon: cell.cellLon - CELL_SIZE }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - dLat * CELL_SIZE, lon: cell.cellLon }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - dLat * CELL_SIZE, lon: cell.cellLon + CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + dLat * CELL_SIZE, lon: newCell.cellLon - CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + dLat * CELL_SIZE, lon: newCell.cellLon }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + dLat * CELL_SIZE, lon: newCell.cellLon + CELL_SIZE }));
-          }
-          if (dLon !== 0) {
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat - CELL_SIZE, lon: cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat, lon: cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcleavecell", JSON.stringify({ lat: cell.cellLat + CELL_SIZE, lon: cell.cellLon - dLon * CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat - CELL_SIZE, lon: newCell.cellLon + dLon * CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat, lon: newCell.cellLon + dLon * CELL_SIZE }));
-            await socket.rpc("rpcjoincell", JSON.stringify({ lat: newCell.cellLat + CELL_SIZE, lon: newCell.cellLon + dLon * CELL_SIZE }));
-          }
-          cell = newCell;
-        } catch (e) {
-          console.error(`Bot ${i} failed cell change`, e);
+      // join new streams
+      for (const s of needed) {
+        const key = cellKey(s);
+        if (!activeStreams.has(key)) {
+          try {
+            await socket.rpc("rpcjoincell", JSON.stringify({ lat: s.lat, lon: s.lon }));
+            activeStreams.add(key);
+          } catch {}
         }
       }
 
+      // leave unused streams
+      for (const key of Array.from(activeStreams)) {
+        if (!needed.some(s => cellKey(s) === key)) {
+          const [clat, clon] = key.split(",").map(Number);
+          try {
+            await socket.rpc("rpcleavecell", JSON.stringify({ lat: clat, lon: clon }));
+          } catch {}
+          activeStreams.delete(key);
+        }
+      }
+
+      // send location
       try {
         await socket.rpc(
           "rpcsendlocation",
           JSON.stringify({
-            lat: cell.cellLat,
-            lon: cell.cellLon,
+            lat: newCell.cellLat,
+            lon: newCell.cellLon,
             data: { lat, lon },
             group: myGroup.name,
           })
@@ -119,9 +130,11 @@ async function createBot(i) {
       } catch (e) {
         console.error(`Bot ${i} failed sending position`, e);
       }
+
+      cell = newCell;
     }, 1000);
 
-    bots.push({ session, socket, interval, lat, lon, cell });
+    bots.push({ session, socket, interval, cell, activeStreams });
   } catch (e) {
     console.error(`Bot ${i} failed:`, e);
   }
@@ -147,22 +160,18 @@ async function cleanupBots() {
 
   console.log("Cleaning up bots...");
 
-  // Stop all intervals first
   for (const b of bots) {
     clearInterval(b.interval);
-  }
 
-  // Leave neighborhoods & close sockets
-  for (const b of bots) {
-    let neighbors = getNeighborCells(b.cell);
-    for (const n of neighbors) {
+    // leave all active streams
+    for (const key of Array.from(b.activeStreams)) {
+      const [clat, clon] = key.split(",").map(Number);
       try {
-        await b.socket.rpc("rpcleavecell", JSON.stringify({ lat: n.lat, lon: n.lon }));
+        await b.socket.rpc("rpcleavecell", JSON.stringify({ lat: clat, lon: clon }));
       } catch {}
     }
+
     try { b.socket.close(); } catch {}
-    // Optional but heavy: delete account
-    // try { await client.deleteAccount(b.session); } catch {}
   }
 
   console.log("All bots cleaned up");
