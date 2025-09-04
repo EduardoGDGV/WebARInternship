@@ -1,65 +1,73 @@
-import { useState, Suspense } from 'react';
 import { __ } from '@wordpress/i18n';
-import { useBlockProps, InspectorControls } from '@wordpress/block-editor';
-import {
-  PanelBody,
-  TextControl,
-  __experimentalNumberControl as NumberControl
-} from '@wordpress/components';
+import { useBlockProps } from '@wordpress/block-editor';
+import { useEffect, useRef } from '@wordpress/element';
 
-// Lazy load BabylonEditor
-const BabylonEditor = React.lazy(() => import('./BabylonEditor'));
+// BabylonJS imports
+import { Engine, Scene, ArcRotateCamera, HemisphericLight, MeshBuilder, Vector3 } from "@babylonjs/core";
+import { GizmoManager } from "@babylonjs/core/Gizmos/gizmoManager.js";
 
-export default function Edit({ attributes, setAttributes }) {
-  const { modelUrl, lat, lng, yaw, pitch, roll } = attributes;
-  const [showEditor] = useState(true);
+export default function Edit() {
+    const blockProps = useBlockProps();
+    const canvasRef = useRef(null);
 
-  const blockProps = useBlockProps({
-    style: { width: '100%', height: '400px' },
-  });
+    useEffect(() => {
+        if (!canvasRef.current) return;
 
-  return (
-    <>
-      <InspectorControls>
-        <PanelBody title={__('Asset Settings', 'wp3d-asset-editor')}>
-          <TextControl
-            label={__('Model URL', 'wp3d-asset-editor')}
-            value={modelUrl}
-            onChange={(v) => setAttributes({ modelUrl: v })}
-          />
-          <NumberControl
-            label={__('Latitude', 'wp3d-asset-editor')}
-            value={lat}
-            onChange={(v) => setAttributes({ lat: parseFloat(v) || 0 })}
-          />
-          <NumberControl
-            label={__('Longitude', 'wp3d-asset-editor')}
-            value={lng}
-            onChange={(v) => setAttributes({ lng: parseFloat(v) || 0 })}
-          />
-          <NumberControl
-            label={__('Yaw (°)', 'wp3d-asset-editor')}
-            value={yaw}
-            onChange={(v) => setAttributes({ yaw: parseFloat(v) || 0 })}
-          />
-          <NumberControl
-            label={__('Pitch (°)', 'wp3d-asset-editor')}
-            value={pitch}
-            onChange={(v) => setAttributes({ pitch: parseFloat(v) || 0 })}
-          />
-          <NumberControl
-            label={__('Roll (°)', 'wp3d-asset-editor')}
-            value={roll}
-            onChange={(v) => setAttributes({ roll: parseFloat(v) || 0 })}
-          />
-        </PanelBody>
-      </InspectorControls>
+        console.log("🛠️ Mounting Babylon editor scene…");
 
-      <div {...blockProps}>
-        <Suspense fallback={<div>{__('Loading 3D Editor…', 'wp3d-asset-editor')}</div>}>
-          {showEditor && <BabylonEditor {...attributes} />}
-        </Suspense>
-      </div>
-    </>
-  );
+        const engine = new Engine(canvasRef.current, true);
+        const scene = new Scene(engine);
+
+        // Camera
+        const camera = new ArcRotateCamera(
+            "camera",
+            Math.PI / 2,
+            Math.PI / 4,
+            6,
+            Vector3.Zero(),
+            scene
+        );
+        camera.attachControl(canvasRef.current, true);
+
+        // Light
+        new HemisphericLight("light", new Vector3(0, 1, 0), scene);
+
+        // Mesh: simple cube
+        const box = MeshBuilder.CreateBox("box", { size: 1 }, scene);
+
+        // 🎮 Gizmo Manager for interaction
+        const gizmoManager = new GizmoManager(scene);
+        gizmoManager.positionGizmoEnabled = true;  // Move gizmo
+        gizmoManager.rotationGizmoEnabled = true;  // Rotate gizmo
+        gizmoManager.scaleGizmoEnabled = false;   // Disable scale for now
+        gizmoManager.attachToMesh(box);
+
+        // Render loop
+        engine.runRenderLoop(() => {
+            scene.render();
+        });
+
+        // Handle resize
+        const onResize = () => engine.resize();
+        window.addEventListener("resize", onResize);
+
+        return () => {
+            console.log("🧹 Disposing Babylon scene…");
+            gizmoManager.dispose();
+            window.removeEventListener("resize", onResize);
+            engine.dispose();
+        };
+    }, []);
+
+    return (
+        <div {...blockProps}>
+            <canvas
+                ref={canvasRef}
+                width="600"
+                height="400"
+                style={{ border: "1px solid black" }}
+            />
+            <p>{ __('Drag arrows to move, circles to rotate', 'wp-3d-asset-editor') }</p>
+        </div>
+    );
 }
