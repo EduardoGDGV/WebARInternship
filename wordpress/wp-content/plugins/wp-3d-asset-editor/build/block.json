@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schemas.wp.org/trunk/block.json",
+  "apiVersion": 3,
+  "name": "wp3d/asset-editor",
+  "version": "0.1.1",
+  "title": "3D Asset Editor",
+  "category": "common",
+  "icon": "location-alt",
+  "description": "Place & rotate a 3D model; stores lat/lng/rotation in post meta.",
+  "textdomain": "wp3d-asset-editor",
+  "example": {},
+  "supports": {
+    "html": false
+  },
+  "attributes": {
+    "modelUrl": {
+      "type": "string",
+      "source": "meta",
+      "meta": "asset_model_url"
+    },
+    "lat": {
+      "type": "number",
+      "source": "meta",
+      "meta": "asset_lat"
+    },
+    "lng": {
+      "type": "number",
+      "source": "meta",
+      "meta": "asset_lng"
+    },
+    "yaw": {
+      "type": "number",
+      "source": "meta",
+      "meta": "asset_yaw"
+    },
+    "pitch": {
+      "type": "number",
+      "source": "meta",
+      "meta": "asset_pitch"
+    },
+    "roll": {
+      "type": "number",
+      "source": "meta",
+      "meta": "asset_roll"
+    }
+  },
+  "editorScript": "file:./index.js",
+  "editorStyle": "file:./style-index.css",
+  "style": "file:./style-index.css"
+}
