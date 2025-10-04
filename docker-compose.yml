@@ -1,0 +1,94 @@
+services:
+  # Nakama DB
+  postgres:
+    image: postgres:12.2-alpine
+    command: postgres -c shared_preload_libraries=pg_stat_statements -c pg_stat_statements.track=all
+    environment:
+      POSTGRES_DB: nakama
+      POSTGRES_PASSWORD: localdb
+    expose:
+      - "8080"
+      - "5432"
+    ports:
+      - "5432:5432"
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "nakama"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - nakama_data:/var/lib/postgresql/data
+
+  # Nakama server
+  nakama:
+    build: ./nakama
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "7349"
+      - "7350"
+      - "7351"
+    ports:
+      - "7349:7349"
+      - "7350:7350"
+      - "7351:7351"
+    entrypoint:
+      - "/bin/sh"
+      - "-ecx"
+      - >
+        /nakama/nakama migrate up --database.address postgres:localdb@postgres:5432/nakama &&
+        exec /nakama/nakama --config /nakama/config/local.yml --database.address postgres:localdb@postgres:5432/nakama --session.token_expiry_sec 7200
+    healthcheck:
+      test: ["CMD", "/nakama/nakama", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./nakama/config:/nakama/config
+
+
+  # WordPress DB
+  mysql:
+    image: mysql:5.7
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wpuser
+      MYSQL_PASSWORD: wppass
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  # WordPress site
+  wordpress:
+    build: ./wordpress
+    depends_on:
+      - mysql
+    ports:
+      - "8081:80"
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_USER: wpuser
+      WORDPRESS_DB_PASSWORD: wppass
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_SITEURL: http://localhost:8081
+      WORDPRESS_HOME: http://wordpress:80
+    volumes:
+      - wp_data:/var/www/html/wp-content/uploads
+
+  # WordPress cron
+  wordpress-cron:
+    image: curlimages/curl:latest
+    depends_on:
+      - wordpress
+    entrypoint: >
+      sh -c "while true; do curl -s http://wordpress:80/wp-cron.php?doing_wp_cron; sleep 60; done"
+    networks:
+      - default
+
+volumes:
+  nakama_data:
+  mysql_data:
+  wp_data:
