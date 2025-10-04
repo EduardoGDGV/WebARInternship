@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Nakama Login</title>
+</head>
+<body>
+  <h2>Nakama Test</h2>
+
+  <input id="email" placeholder="Email" />
+  <input id="password" placeholder="Password" type="password" />
+
+  <button id="signupBtn">Sign Up</button>
+  <button id="loginBtn">Log In</button>
+
+  <p id="status"></p>
+
+  <script type="module">
+    import { signUp, logIn } from "./src/app.js";
+
+    const emailEl = document.getElementById("email");
+    const passEl = document.getElementById("password");
+    const statusEl = document.getElementById("status");
+
+    document.getElementById("signupBtn").onclick = async () => {
+      try {
+        const session = await signUp(emailEl.value, passEl.value);
+        statusEl.innerText = `Signed up: ${session.user_id}`;
+      } catch (err) {
+        statusEl.innerText = "SignUp failed";
+      }
+    };
+
+    document.getElementById("loginBtn").onclick = async () => {
+      try {
+        const session = await logIn(emailEl.value, passEl.value);
+        statusEl.innerText = `Logged in: ${session.user_id}`;
+      } catch (err) {
+        statusEl.innerText = "Login failed";
+      }
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+logger:
+    level: DEBUG
+
+database:
+    addresses:
+        - "postgres:localdb@postgres:5432/nakama"
+    max_open_conns: 100
+    max_idle_conns: 50
+    conn_max_lifetime_sec: 3600
