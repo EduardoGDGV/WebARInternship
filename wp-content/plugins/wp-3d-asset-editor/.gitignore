@@ -1,0 +1,55 @@
+# ----------------------------
+# Node.js / JavaScript
+# ----------------------------
+
+# Dependency directories
+node_modules/
+
+# Optional npm cache directory
+.npm
+
+# Yarn / pnpm / Lerna debug logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Build artifacts you don't want to track (except WordPress block build)
+dist/
+dist-ssr/
+*.local
+*.tgz
+
+# Optional eslint cache
+.eslintcache
+
+# ----------------------------
+# WordPress specific
+# ----------------------------
+
+# Runtime-generated content
+wp-content/uploads/
+wp-content/upgrade/
+wp-content/cache/
+
+# Ignore plugin zips created by wp-scripts
+*.zip
+
+# ----------------------------
+# Logs
+# ----------------------------
+logs/
+*.log
+
+# ----------------------------
+# IDE / OS files
+# ----------------------------
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

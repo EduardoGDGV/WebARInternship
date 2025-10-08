@@ -1,0 +1,39 @@
+{
+  "name": "wp-3d-asset-editor",
+  "version": "1.0.0",
+  "description": "Gutenberg block for placing and rotating 3D assets.",
+  "author": "Your Name",
+  "license": "GPL-2.0-or-later",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "wp-scripts build --webpack-copy-php --blocks-manifest",
+    "format": "wp-scripts format",
+    "lint:css": "wp-scripts lint-style",
+    "lint:js": "wp-scripts lint-js",
+    "packages-update": "wp-scripts packages-update",
+    "plugin-zip": "wp-scripts plugin-zip",
+    "start": "wp-scripts start --webpack-copy-php --blocks-manifest"
+  },
+  "dependencies": {
+    "@babylonjs/core": "^8.27.2",
+    "@babylonjs/loaders": "^8.27.2",
+    "@wordpress/block-editor": "^15.4.0",
+    "@wordpress/blocks": "^15.4.0",
+    "@wordpress/components": "^30.4.0",
+    "@wordpress/element": "^6.31.0",
+    "@wordpress/i18n": "^6.4.0",
+    "leaflet": "^1.9.4",
+    "leaflet-image": "^0.4.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@wordpress/scripts": "^30.24.0",
+    "ajv": "^8.17.1",
+    "ajv-keywords": "^5.1.0"
+  },
+  "browserslist": [
+    "last 2 versions",
+    "not ie <= 11"
+  ]
+}

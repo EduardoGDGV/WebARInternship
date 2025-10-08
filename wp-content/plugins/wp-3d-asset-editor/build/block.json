@@ -1,0 +1,47 @@
+{
+  "apiVersion": 3,
+  "name": "wp-3d-asset-editor/block",
+  "title": "3D Shared Scene",
+  "category": "widgets",
+  "icon": "media",
+  "supports": {
+    "html": false
+  },
+  "attributes": {
+    "blockAssetId": {
+      "type": "number",
+      "default": null
+    },
+    "assetUrl": {
+      "type": "string",
+      "default": ""
+    },
+    "posX": {
+      "type": "number",
+      "default": 0
+    },
+    "posY": {
+      "type": "number",
+      "default": 0
+    },
+    "posZ": {
+      "type": "number",
+      "default": 0
+    },
+    "rotX": {
+      "type": "number",
+      "default": 0
+    },
+    "rotY": {
+      "type": "number",
+      "default": 0
+    },
+    "rotZ": {
+      "type": "number",
+      "default": 0
+    }
+  },
+  "editorScript": "file:./index.js",
+  "editorStyle": "file:./editor.css",
+  "style": "file:./style.css"
+}
