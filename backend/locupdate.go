@@ -22,6 +22,7 @@ type Position struct {
 
 type Player struct {
 	UserID string   `json:"UserID"`
+	Username string   `json:"Username"`
 	Pos    Position `json:"Pos"`
 }
 
@@ -88,6 +89,7 @@ func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) s
 // Update player
 func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, pos Position) {
 	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+	username, _ := ctx.Value(runtime.RUNTIME_CTX_USERNAME).(string)
 	sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
 	newCells := determineCells(pos.Lat, pos.Lon)
 
@@ -132,7 +134,7 @@ func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, pos Posi
 	playerCells[userID] = newCells
 
 	// broadcast update to cells
-	playerUpdate, _ := json.Marshal(&Player{UserID: userID, Pos: pos})
+	playerUpdate, _ := json.Marshal(&Player{UserID: userID, Username: username, Pos: pos})
 	for _, cell := range newCells {
 		_ = nk.StreamSend(StreamMode, "", "", cell, string(playerUpdate), nil, false)
 	}

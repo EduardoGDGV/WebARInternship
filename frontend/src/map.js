@@ -42,9 +42,8 @@ const blueIcon = new L.Icon({
   iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png"
 });
 const playerIcon = new L.Icon({
-  iconUrl: "http://localhost:8081/wp-content/uploads/2025/10/player.jpg",
-  iconSize: [40, 40],
-  iconAnchor: [20, 40],
+  iconUrl: "http://localhost:8081/wp-content/uploads/2025/10/player1.png",
+  iconSize: [50, 50],
 });
 
 const CELL_SIZE = 0.001;
@@ -159,7 +158,7 @@ async function addBuildingsToMap(map) {
 
       const icon = L.icon({
         iconUrl: bld.image || "default.png",
-        iconSize: [40, 40]
+        iconSize: [50, 50]
       });
 
       const marker = L.marker([lat, lon], { icon })
@@ -173,20 +172,20 @@ async function addBuildingsToMap(map) {
 }
 
 // Player labels (name above marker)
-function createPlayerLabel(userId, lat, lon) {
-  const shortId = userId.length > 8 ? userId.slice(0, 8) + "..." : userId;
+function createPlayerLabel(userId, username, lat, lon) {
+  const shortId = username.length > 8 ? username.slice(0, 8) + "..." : username;
   const label = L.divIcon({
     className: "player-label",
     html: `<div style="text-align:center; color:white; font-weight:bold; text-shadow:1px 1px 2px black;">${shortId}</div>`,
     iconSize: [100, 20],
-    iconAnchor: [50, 45],
+    iconAnchor: [50, 30],
   });
   const labelMarker = L.marker([lat, lon], { icon: label, interactive: false }).addTo(currentMap);
   playerLabels.set(userId, labelMarker);
 }
 
 // Player Markers
-function updatePlayerMarker(userId, lat, lon, group) {
+function updatePlayerMarker(userId, username, lat, lon, group) {
   if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
 
   const isSelf = userId === session.user_id;
@@ -204,7 +203,7 @@ function updatePlayerMarker(userId, lat, lon, group) {
   if (playerLabels.has(userId)) {
     playerLabels.get(userId).setLatLng([lat, lon]);
   } else {
-    createPlayerLabel(userId, lat, lon);
+    createPlayerLabel(userId, username, lat, lon);
   }
 }
 
@@ -257,8 +256,8 @@ function setupStreamHandlers() {
         return;
       }
 
-      const { UserID, Pos } = payload;
-      if (!UserID || !Pos || UserID === session.user_id) return;
+      const { UserID, Username, Pos } = payload;
+      if (!UserID || !Username || !Pos || UserID === session.user_id) return;
 
       const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
       const newCell = cellKey(cLat, cLon);
@@ -269,7 +268,7 @@ function setupStreamHandlers() {
       cellPlayers.get(newCell).add(UserID);
       playerCell.set(UserID, newCell);
 
-      updatePlayerMarker(UserID, Pos.lat, Pos.lon, Pos.group);
+      updatePlayerMarker(UserID, Username, Pos.lat, Pos.lon, Pos.group);
     } catch (err) {
       console.error("Failed handling stream data:", err);
     }
@@ -325,7 +324,7 @@ function startPositionUpdates() {
     if (playerLabels.has(session.user_id)) {
       playerLabels.get(session.user_id).setLatLng([lat, lon]);
     } else {
-      createPlayerLabel(session.user_id, lat, lon);
+      createPlayerLabel(session.user_id, session.username, lat, lon);
     }
 
     // keep cells in sync

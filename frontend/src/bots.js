@@ -22,9 +22,10 @@ async function createBot(i) {
 
   const email = `bot${i}@example.com`;
   const password = "botpassword";
+  const username = `bot${i}`;
 
   try {
-    const session = await client.authenticateEmail(email, password, true);
+    const session = await client.authenticateEmail(email, password, true, username);
     const socket = client.createSocket();
     let socketClosed = false;
 
@@ -101,11 +102,20 @@ async function spawnBots() {
 async function cleanupBots() {
   if (cleaningUp) return;
   cleaningUp = true;
-
   console.log("Cleaning up bots...");
   for (const b of bots) {
     try { b.socket.close(); } catch {}
+    // Delete the bot account using its session
+    if (b.session) {
+      try {
+        await client.deleteAccount(b.session);
+        console.log(`Deleted account for ${b.session.username || b.session.user_id}`);
+      } catch (err) {
+        console.warn("Failed to delete account:", err);
+      }
+    }
   }
+  
   console.log("All bots cleaned up");
   process.exit();
 }
