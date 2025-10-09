@@ -27,19 +27,37 @@ let socket = null;
 
 let myMarker = null;
 let myGroup = null;
-
 let playerMarkers = new Map(); // userId -> marker
+let playerLabels = new Map();  // userId -> label (divIcon)
 let cellPlayers = new Map();   // cellKey -> Set(userId)
 let playerCell = new Map();    // userId -> physical cellKey
 let relevantCells = new Set(); // current + neighbor cells
-
 let buildingMarkers = [];
+
+// Icons
+const redIcon = new L.Icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png"
+});
+const blueIcon = new L.Icon({
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png"
+});
+const playerIcon = new L.Icon({
+  iconUrl: "http://localhost:8081/wp-content/uploads/2025/10/player.jpg",
+  iconSize: [40, 40],
+  iconAnchor: [20, 40],
+});
+
 const CELL_SIZE = 0.001;
+const centerLat = -23.55574;
+const centerLon = -46.72980;
+let currentMap = null;
 
-let sections = [];
-let revealedSections = [];
-
-const mapBounds = [[-23.557045162755653, -46.73422584856919], [-23.55147505044313, -46.73130018212596], [-23.554510643537427, -46.72538454895334], [-23.55966804391334, -46.72839059081891]]
+const mapBounds = [
+  [-23.557045162755653, -46.73422584856919],
+  [-23.55147505044313, -46.73130018212596],
+  [-23.554510643537427, -46.72538454895334],
+  [-23.55966804391334, -46.72839059081891]
+]
 
 function cellKey(lat, lon) {
   return `${parseFloat(lat).toFixed(5)},${parseFloat(lon).toFixed(5)}`;
@@ -71,23 +89,14 @@ function determineCells(lat, lon) {
   return keys;
 }
 
-// Icons
-const redIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png"
-});
-const blueIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png"
-});
-
 // Leaflet Map
-let currentMap = null;
-function initLeaflet(mapDivId, lat = -23.55574, lon = -46.72980) {
+function initLeaflet(mapDivId, lat = centerLat, lon = centerLon) {
   const map = L.map(mapDivId).setView([lat, lon], 17);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     minZoom: 16,    // lowest zoom
     maxZoom: 19,   // highest zoom supported by the tile server
   }).addTo(map);
-  myMarker = L.marker([lat, lon]).addTo(map).bindPopup("You");
+  myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b>`);
 
   const latitudes = mapBounds.map(p => p[0]);
   const longitudes = mapBounds.map(p => p[1]);
@@ -101,7 +110,6 @@ function initLeaflet(mapDivId, lat = -23.55574, lon = -46.72980) {
   });
   
   currentMap = map;
-
   return map;
 }
 
@@ -156,7 +164,7 @@ async function addBuildingsToMap(map) {
 
       const marker = L.marker([lat, lon], { icon })
         .addTo(map)
-        .bindPopup(`<a href="${bld.link || '#'}" target="_blank">${bld.title || 'Building'}</a>`);
+        .bindPopup(`<b>Building</b>`);
 
       marker.options.buildingId = bld.id;
       buildingMarkers.push(marker);
@@ -164,32 +172,39 @@ async function addBuildingsToMap(map) {
   });
 }
 
+// Player labels (name above marker)
+function createPlayerLabel(userId, lat, lon) {
+  const shortId = userId.length > 8 ? userId.slice(0, 8) + "..." : userId;
+  const label = L.divIcon({
+    className: "player-label",
+    html: `<div style="text-align:center; color:white; font-weight:bold; text-shadow:1px 1px 2px black;">${shortId}</div>`,
+    iconSize: [100, 20],
+    iconAnchor: [50, 45],
+  });
+  const labelMarker = L.marker([lat, lon], { icon: label, interactive: false }).addTo(currentMap);
+  playerLabels.set(userId, labelMarker);
+}
+
 // Player Markers
 function updatePlayerMarker(userId, lat, lon, group) {
-  if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) return;
+  if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
 
-  const icon = (group === myGroup?.name) ? blueIcon : redIcon;
-
+  const isSelf = userId === session.user_id;
+  const icon = isSelf ? playerIcon : (group === myGroup?.name ? blueIcon : redIcon);
+  
+  let marker = playerMarkers.get(userId);
   if (playerMarkers.has(userId)) {
-    const marker = playerMarkers.get(userId);
     marker.setLatLng([lat, lon]);
-    marker.setIcon(icon);
   } else {
-    const marker = L.marker([lat, lon], { icon })
-      .addTo(currentMap)
-      .bindPopup(`Player: ${userId}`);
+    marker = L.marker([lat, lon], { icon }).addTo(currentMap)
     playerMarkers.set(userId, marker);
   }
 
-  if (userId === session.user_id) {
-    // Check which section the player is inside
-    sections.forEach((poly, idx) => {
-        if (pointInPolygon([lat, lon], poly)) {
-            if (!revealedSections.includes(idx)) {
-                revealedSections.push(idx);
-            }
-        }
-    });
+  // Update label
+  if (playerLabels.has(userId)) {
+    playerLabels.get(userId).setLatLng([lat, lon]);
+  } else {
+    createPlayerLabel(userId, lat, lon);
   }
 }
 
@@ -198,6 +213,12 @@ function removePlayerMarker(userId) {
   if (marker){
     currentMap.removeLayer(marker);
     playerMarkers.delete(userId);
+  }
+
+  const label = playerLabels.get(userId);
+  if (label){
+    currentMap.removeLayer(label);
+    playerLabels.delete(userId);
   }
 
   const cell = playerCell.get(userId);
@@ -232,32 +253,23 @@ function setupStreamHandlers() {
     try {
       const payload = JSON.parse(stream.data);
       if (payload.leave) {
-        if (payload.leave === session.user_id) return;
-        removePlayerMarker(payload.leave);
-      } else {
-        if (!payload || !payload.UserID || !payload.Pos) return;
-
-        const { UserID, Pos } = payload;
-        if (UserID === session.user_id) return;
-
-        const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
-        const newCell = cellKey(cLat, cLon);
-        const oldCell = playerCell.get(UserID);
-
-        if (!relevantCells.has(newCell) && Pos.group != myGroup.name) return;
-
-        if (oldCell && oldCell !== newCell) {
-          const set = cellPlayers.get(oldCell);
-          if (set) set.delete(UserID);
-          if (set && set.size === 0) cellPlayers.delete(oldCell);
-        }
-
-        if (!cellPlayers.has(newCell)) cellPlayers.set(newCell, new Set());
-        cellPlayers.get(newCell).add(UserID);
-        playerCell.set(UserID, newCell);
-
-        updatePlayerMarker(UserID, Pos.lat, Pos.lon, Pos.group);
+        if (payload.leave !== session.user_id) removePlayerMarker(payload.leave);
+        return;
       }
+
+      const { UserID, Pos } = payload;
+      if (!UserID || !Pos || UserID === session.user_id) return;
+
+      const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
+      const newCell = cellKey(cLat, cLon);
+
+      if (!relevantCells.has(newCell) && Pos.group != myGroup.name) return;
+
+      if (!cellPlayers.has(newCell)) cellPlayers.set(newCell, new Set());
+      cellPlayers.get(newCell).add(UserID);
+      playerCell.set(UserID, newCell);
+
+      updatePlayerMarker(UserID, Pos.lat, Pos.lon, Pos.group);
     } catch (err) {
       console.error("Failed handling stream data:", err);
     }
@@ -299,38 +311,22 @@ function setupStreamHandlers() {
 // Position Updates
 function startPositionUpdates() {
   const INTERVAL_MS = 1000;
-  const centerLat = -23.55574;
-  const centerLon = -46.72980;
-  const radiusMeters = 250;
-
-  // Conversion factors
-  const metersPerDegLat = 111320;
-  const metersPerDegLon = 111320 * Math.cos(centerLat * Math.PI / 180);
-
-  const radiusLat = radiusMeters / metersPerDegLat;
-  const radiusLon = radiusMeters / metersPerDegLon;
-
-  // Start position
-  const startLat = -23.55742;
-  const startLon = -46.73034;
-
-  // Compute initial angle from start point
-  let dx = (startLat - centerLat) / radiusLat;
-  let dy = (startLon - centerLon) / radiusLon;
-  let angle = Math.atan2(dy, dx);
-
-  const angularSpeed = (2 * Math.PI) / 60; // full circle in 60s
-
-  myMarker.setLatLng([startLat, startLon]);
+  let lat = centerLat;
+  let lon = centerLon;
   setInterval(async () => {
     if (!myMarker) return;
 
-    const lat = centerLat + radiusLat * Math.cos(angle);
-    const lon = centerLon + radiusLon * Math.sin(angle);
+    lat += (Math.random() - 0.5) * 0.0002;
+    lon += (Math.random() - 0.5) * 0.0002;
 
     myMarker.setLatLng([lat, lon]);
 
-    angle += angularSpeed;
+    // Update label position
+    if (playerLabels.has(session.user_id)) {
+      playerLabels.get(session.user_id).setLatLng([lat, lon]);
+    } else {
+      createPlayerLabel(session.user_id, lat, lon);
+    }
 
     // keep cells in sync
     const newRelevant = new Set(determineCells(lat, lon));
@@ -340,7 +336,8 @@ function startPositionUpdates() {
     const physicalCell = cellKey(cLat, cLon);
     playerCell.set(session.user_id, physicalCell);
     if (!cellPlayers.has(physicalCell)) cellPlayers.set(physicalCell, new Set());
-    cellPlayers.get(physicalCell).add(session.user_id);
+    const players = cellPlayers.get(physicalCell);
+    if (!players.has(session.user_id)) players.add(session.user_id);
 
     try {
       const payload = { lat, lon };
@@ -366,5 +363,5 @@ export async function initMap(mapDivId) {
   myGroup = metadata?.group;
 
   setupStreamHandlers();
-  startPositionUpdates(37.7749, -122.4194);
+  startPositionUpdates();
 }

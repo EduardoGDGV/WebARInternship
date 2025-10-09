@@ -254,9 +254,9 @@ func InitBuildings(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 	}
 
 	// Wait for WordPress
-	wpURL := fmt.Sprintf(wpPostsURL, wpCategoryID)
+	wpURL := "http://wordpress:80/wp-json/wp/v2/posts/"
 	if err := waitForWP(logger, wpURL, time.Minute); err != nil {
-		return err
+		return nil
 	}
 
 	// Populate storage if empty
