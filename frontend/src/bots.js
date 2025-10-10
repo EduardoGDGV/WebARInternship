@@ -1,13 +1,13 @@
 import { Client } from "@heroiclabs/nakama-js";
 
-// Catch unhandled promise rejections globally
+// Catch unhandled promise rejections
 process.on("unhandledRejection", (reason) => {
   console.warn("Unhandled Rejection (ignored):", reason);
 });
 
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 
-const NUM_BOTS = 800;       // total bots
+const NUM_BOTS = 500;       // total bots
 const BATCH_SIZE = 5;       // spawn bots per batch
 const CONCURRENCY_LIMIT = 20; // max bots simultaneously connecting
 const bots = [];

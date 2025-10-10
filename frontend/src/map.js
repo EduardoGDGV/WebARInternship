@@ -10,9 +10,8 @@
   Missing: 1. Remove player markers on disconnect.
            2. Real position updates from GPS or other sources.
            3. Error handling and reconnection logic for the socket.
-           4. UI elements for better interaction (e.g., showing player names, building info).
-           5. Correct assets and their positions.
-           6. Map design and styling.
+           4. Correct assets and their positions.
+           5. Map design and styling.
            etc......
            
 */
@@ -95,7 +94,7 @@ function initLeaflet(mapDivId, lat = centerLat, lon = centerLon) {
     minZoom: 16,    // lowest zoom
     maxZoom: 19,   // highest zoom supported by the tile server
   }).addTo(map);
-  myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b>`);
+  myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b><br>Group: ${myGroup || 'None'}`);
 
   const latitudes = mapBounds.map(p => p[0]);
   const longitudes = mapBounds.map(p => p[1]);
@@ -163,7 +162,7 @@ async function addBuildingsToMap(map) {
 
       const marker = L.marker([lat, lon], { icon })
         .addTo(map)
-        .bindPopup(`<b>Building</b>`);
+        .bindPopup(`<b>Building ${bld.id}</b>`);
 
       marker.options.buildingId = bld.id;
       buildingMarkers.push(marker);
@@ -172,7 +171,7 @@ async function addBuildingsToMap(map) {
 }
 
 // Player labels (name above marker)
-function createPlayerLabel(userId, username, lat, lon) {
+function createPlayerLabel(userId, username, group, lat, lon) {
   const shortId = username.length > 8 ? username.slice(0, 8) + "..." : username;
   const label = L.divIcon({
     className: "player-label",
@@ -180,7 +179,9 @@ function createPlayerLabel(userId, username, lat, lon) {
     iconSize: [100, 20],
     iconAnchor: [50, 30],
   });
-  const labelMarker = L.marker([lat, lon], { icon: label, interactive: false }).addTo(currentMap);
+  const labelMarker = L.marker([lat, lon], { icon: label, interactive: false })
+    .addTo(currentMap)
+    .bindPopup(`<b>${username}</b><br>Group: ${group || 'None'}`);
   playerLabels.set(userId, labelMarker);
 }
 
@@ -195,7 +196,9 @@ function updatePlayerMarker(userId, username, lat, lon, group) {
   if (playerMarkers.has(userId)) {
     marker.setLatLng([lat, lon]);
   } else {
-    marker = L.marker([lat, lon], { icon }).addTo(currentMap)
+    marker = L.marker([lat, lon], { icon })
+      .addTo(currentMap)
+      .bindPopup(`<b>${username}</b><br>Group: ${group || 'None'}`);
     playerMarkers.set(userId, marker);
   }
 
@@ -203,7 +206,7 @@ function updatePlayerMarker(userId, username, lat, lon, group) {
   if (playerLabels.has(userId)) {
     playerLabels.get(userId).setLatLng([lat, lon]);
   } else {
-    createPlayerLabel(userId, username, lat, lon);
+    createPlayerLabel(userId, username, group, lat, lon);
   }
 }
 
@@ -290,7 +293,7 @@ function setupStreamHandlers() {
         const marker = L.marker([lat, lon], {
           icon: L.icon({ iconUrl: bld.image || "default.png", iconSize: [40, 40] })
         }).addTo(currentMap)
-          .bindPopup(`<a href="${bld.link || '#'}" target="_blank">${bld.title || 'Building'}</a>`);
+          .bindPopup(`<a href="${bld.link || '#'}" target="_blank">${bld.title || 'Building' + bld.id}</a>`);
         marker.options.buildingId = bld.id;
         buildingMarkers.push(marker);
       }
@@ -307,8 +310,69 @@ function setupStreamHandlers() {
   }
 }
 
-// Position Updates
+let lastUpdateTime = 0;
+const UPDATE_INTERVAL = 2000; // ms
+
 function startPositionUpdates() {
+  if (!("geolocation" in navigator)) {
+    alert("Geolocation is not supported by your browser.");
+    return;
+  }
+
+  // Watch the user's position
+  const watchId = navigator.geolocation.watchPosition(
+    async (pos) => {
+       const now = Date.now();
+      if (now - lastUpdateTime < UPDATE_INTERVAL) return; // skip if too soon
+      lastUpdateTime = now;
+
+      const lat = pos.coords.latitude;
+      const lon = pos.coords.longitude;
+
+      if (!myMarker) return;
+
+      // Update your own marker position
+      myMarker.setLatLng([lat, lon]);
+      currentMap.panTo([lat, lon]);
+
+      // Update name label position
+      if (playerLabels.has(session.user_id)) {
+        playerLabels.get(session.user_id).setLatLng([lat, lon]);
+      } else {
+        createPlayerLabel(session.user_id, session.username, myGroup, lat, lon);
+      }
+
+      // Update visible cells
+      const newRelevant = new Set(determineCells(lat, lon));
+      cleanupCells(newRelevant);
+
+      const [cLat, cLon] = getCell(lat, lon);
+      const physicalCell = cellKey(cLat, cLon);
+      playerCell.set(session.user_id, physicalCell);
+      if (!cellPlayers.has(physicalCell)) cellPlayers.set(physicalCell, new Set());
+      cellPlayers.get(physicalCell).add(session.user_id);
+
+      try {
+        const payload = { lat, lon };
+        await socket.rpc("update_position", JSON.stringify(payload));
+      } catch (e) {
+        console.error("Failed sending position update", e);
+      }
+    },
+    (err) => {
+      console.error("Geolocation error:", err);
+      alert("Could not get location: " + err.message);
+    },
+    {
+      enableHighAccuracy: true, // use GPS if available
+      maximumAge: 0,            // do not use cached location
+      timeout: 10000            // wait up to 10s for a fix
+    }
+  );
+}
+
+// Position Updates (OLD - for simulated testing without GPS)
+/*function startPositionUpdatesOLD() {
   const INTERVAL_MS = 1000;
   let lat = centerLat;
   let lon = centerLon;
@@ -324,7 +388,7 @@ function startPositionUpdates() {
     if (playerLabels.has(session.user_id)) {
       playerLabels.get(session.user_id).setLatLng([lat, lon]);
     } else {
-      createPlayerLabel(session.user_id, session.username, lat, lon);
+      createPlayerLabel(session.user_id, session.username, myGroup, lat, lon);
     }
 
     // keep cells in sync
@@ -335,8 +399,7 @@ function startPositionUpdates() {
     const physicalCell = cellKey(cLat, cLon);
     playerCell.set(session.user_id, physicalCell);
     if (!cellPlayers.has(physicalCell)) cellPlayers.set(physicalCell, new Set());
-    const players = cellPlayers.get(physicalCell);
-    if (!players.has(session.user_id)) players.add(session.user_id);
+    cellPlayers.get(physicalCell).add(session.user_id);
 
     try {
       const payload = { lat, lon };
@@ -346,6 +409,7 @@ function startPositionUpdates() {
     }
   }, INTERVAL_MS);
 }
+*/
 
 // Main
 export async function initMap(mapDivId) {
