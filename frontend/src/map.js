@@ -267,6 +267,7 @@ function setupStreamHandlers() {
   }
 
   socket.onstreamdata = async (stream) => {
+    console.log("Received stream data:", stream);
     try {
       const { UserID, Pos } = JSON.parse(stream.data);
       if (!UserID || !Pos || UserID === session.user_id) return;

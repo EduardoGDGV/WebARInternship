@@ -43,6 +43,7 @@ func determineCells(lat, lon float32) []string {
 	offsetLat := lat - baseLat
 	offsetLon := lon - baseLon
 
+	// First cell is always the base cell
 	keys := []string{cellKey(baseLat, baseLon)}
 
 	if offsetLat > 0 {
@@ -149,17 +150,14 @@ func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, pos Posi
 		return
 	}
 
-	for _, cell := range newCells {
-		err := nk.StreamSend(StreamMode, "", "", cell, string(posJSON), nil, false)
-		if err != nil {
-			fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
-		}
+	realCell := newCells[0] // Real cell
+	if err := nk.StreamSend(StreamMode, "", "", realCell, string(posJSON), nil, false); err != nil {
+		fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
 	}
 
 	// Broadcast to group if applicable
 	if group != "" {
-		err := nk.StreamSend(StreamMode, "", "", group, string(posJSON), nil, false)
-		if err != nil {
+		if err := nk.StreamSend(StreamMode, "", "", group, string(posJSON), nil, false); err != nil {
 			fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
 		}
 	}

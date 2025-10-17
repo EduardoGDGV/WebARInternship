@@ -12,6 +12,7 @@ WORKDIR /nakama
 COPY backend/ ./backend/
 COPY go.mod go.sum ./
 COPY config/ ./config/
+RUN go env -w GOPROXY=direct
 RUN cd backend && go build --trimpath --buildmode=plugin -o ../data/modules/backend.so
 
 # Final Nakama image
