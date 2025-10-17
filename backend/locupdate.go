@@ -1,7 +1,9 @@
 package main
 
 import (
+	//"bytes"
 	"context"
+	//"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -10,21 +12,14 @@ import (
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
-const (
-	CELL_SIZE  = 0.001 // ~100m per cell
-)
-
+// Compact binary position
 type Position struct {
-	Lat   float64 `json:"lat"`
-	Lon   float64 `json:"lon"`
-	Group string  `json:"group,omitempty"`
+	Lat float32 `json:"lat"`
+	Lon float32 `json:"lon"`
 }
 
-type Player struct {
-	UserID string   `json:"UserID"`
-	Username string   `json:"Username"`
-	Pos    Position `json:"Pos"`
-}
+// Each stream cell covers ~100 meters
+const CELL_SIZE float32 = 0.001
 
 // Caches
 var (
@@ -34,16 +29,16 @@ var (
 )
 
 // Helpers
-func cellKey(lat, lon float64) string {
+func cellKey(lat, lon float32) string {
 	return fmt.Sprintf("%.5f,%.5f", lat, lon)
 }
 
-func getCell(lat, lon float64) (float64, float64) {
-	return math.Floor(lat/CELL_SIZE) * CELL_SIZE,
-		math.Floor(lon/CELL_SIZE) * CELL_SIZE
+func getCell(lat, lon float32) (float32, float32) {
+	return float32(math.Floor(float64(lat/CELL_SIZE)) * float64(CELL_SIZE)),
+		float32(math.Floor(float64(lon/CELL_SIZE)) * float64(CELL_SIZE))
 }
 
-func determineCells(lat, lon float64) []string {
+func determineCells(lat, lon float32) []string {
 	baseLat, baseLon := getCell(lat, lon)
 	offsetLat := lat - baseLat
 	offsetLon := lon - baseLon
@@ -52,19 +47,20 @@ func determineCells(lat, lon float64) []string {
 
 	if offsetLat > 0 {
 		keys = append(keys, cellKey(baseLat+CELL_SIZE, baseLon))
-	}
-	if offsetLat < 0 {
+		baseLat += CELL_SIZE
+	} else if offsetLat < 0 {
 		keys = append(keys, cellKey(baseLat-CELL_SIZE, baseLon))
+		baseLat -= CELL_SIZE
 	}
 	if offsetLon > 0 {
 		keys = append(keys, cellKey(baseLat, baseLon+CELL_SIZE))
-	}
-	if offsetLon < 0 {
+		baseLon += CELL_SIZE
+	} else if offsetLon < 0 {
 		keys = append(keys, cellKey(baseLat, baseLon-CELL_SIZE))
+		baseLon -= CELL_SIZE
 	}
 	if offsetLat != 0 && offsetLon != 0 {
-		keys = append(keys, cellKey(baseLat+math.Copysign(CELL_SIZE, offsetLat),
-			baseLon+math.Copysign(CELL_SIZE, offsetLon)))
+		keys = append(keys, cellKey(baseLat, baseLon))
 	}
 	return keys
 }
@@ -82,26 +78,35 @@ func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) s
 		return group
 	}
 
-	// No group
 	return ""
 }
 
-// Update player
+// EncodePosition packs a Position struct into 8 bytes
+/*func EncodePosition(pos Position) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, pos.Lat); err != nil {
+		return nil, err
+	}
+	if err := binary.Write(buf, binary.LittleEndian, pos.Lon); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}*/
+
+// Core Update Function
 func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, pos Position) {
 	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-	username, _ := ctx.Value(runtime.RUNTIME_CTX_USERNAME).(string)
 	sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
-	newCells := determineCells(pos.Lat, pos.Lon)
 
+	newCells := determineCells(pos.Lat, pos.Lon)
 	group := getUserGroup(ctx, nk, userID)
-	pos.Group = group
 
 	cellLock.Lock()
 	defer cellLock.Unlock()
 
-	// leave old streams not in newCells
+	// Leave old cells
 	oldCells := playerCells[userID]
-	newCellsMap := make(map[string]struct{})
+	newCellsMap := make(map[string]struct{}, len(newCells))
 	for _, c := range newCells {
 		newCellsMap[c] = struct{}{}
 	}
@@ -109,50 +114,68 @@ func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, pos Posi
 		if _, stillInNew := newCellsMap[cell]; !stillInNew {
 			if err := nk.StreamUserLeave(StreamMode, "", "", cell, userID, sessionID); err != nil {
 				fmt.Printf("Failed stream leave for user %s: %v\n", userID, err)
-			} else {
-				leaveMap := map[string]any{"leave": userID}
-				leaveUpdate, _ := json.Marshal(leaveMap)
-				_ = nk.StreamSend(StreamMode, "", "", cell, string(leaveUpdate), nil, false)
 			}
 		}
 	}
 
-	// join new streams not already joined
-	oldCellsMap := make(map[string]struct{})
+	// Join new cells
+	oldCellsMap := make(map[string]struct{}, len(oldCells))
 	for _, c := range oldCells {
 		oldCellsMap[c] = struct{}{}
 	}
+
 	for _, cell := range newCells {
 		if _, alreadyJoined := oldCellsMap[cell]; !alreadyJoined {
-			_, _ = nk.StreamUserJoin(StreamMode, "", "", cell, userID, sessionID, false, false, "")
-			joinMap := map[string]any{"join": userID}
-			joinUpdate, _ := json.Marshal(joinMap)
-			_ = nk.StreamSend(StreamMode, "", "", cell, string(joinUpdate), nil, false)
+			if _, err := nk.StreamUserJoin(StreamMode, "", "", cell, userID, sessionID, false, false, ""); err != nil {
+				fmt.Printf("Failed stream join for user %s: %v\n", userID, err)
+			}
 		}
 	}
 
 	playerCells[userID] = newCells
 
-	// broadcast update to cells
-	playerUpdate, _ := json.Marshal(&Player{UserID: userID, Username: username, Pos: pos})
-	for _, cell := range newCells {
-		_ = nk.StreamSend(StreamMode, "", "", cell, string(playerUpdate), nil, false)
+	payload := struct {
+		UserID string   `json:"UserID"`
+		Pos    Position `json:"Pos"`
+	}{
+		UserID: userID,
+		Pos:    pos,
 	}
 
-	// broadcast to group stream
+	// Broadcast JSON position
+	posJSON, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Printf("Failed to marshal position for user %s: %v\n", userID, err)
+		return
+	}
+
+	for _, cell := range newCells {
+		err := nk.StreamSend(StreamMode, "", "", cell, string(posJSON), nil, false)
+		if err != nil {
+			fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
+		}
+	}
+
+	// Broadcast to group if applicable
 	if group != "" {
-		_ = nk.StreamSend(StreamMode, "", "", group, string(playerUpdate), nil, false)
+		err := nk.StreamSend(StreamMode, "", "", group, string(posJSON), nil, false)
+		if err != nil {
+			fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
+		}
 	}
 }
 
-// RPC handler
+// RPC Handler
 func rpcUpdatePosition(ctx context.Context, nk runtime.NakamaModule, payload string) (string, error) {
 	var pos Position
 	if err := json.Unmarshal([]byte(payload), &pos); err != nil {
 		return "", runtime.NewError("invalid payload", 3)
 	}
 
-	updatePlayerPosition(ctx, nk, pos)
+	if pos.Lat < -90 || pos.Lat > 90 || pos.Lon < -180 || pos.Lon > 180 {
+		return "", runtime.NewError("invalid coordinates", 3)
+	}
 
+	updatePlayerPosition(ctx, nk, pos)
 	return "ok", nil
 }

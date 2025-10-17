@@ -29,8 +29,8 @@ const (
 	JoinLockKey     = "join_lock"
 	GroupSizeKey    = "max_group_size"
 	NextGroupKey    = "next_group"
-	StreamMode      = 4
-	AdminID         = "319e1542-46ed-42fa-aa71-3d26dc6c976e"
+	StreamMode      = 2
+	AdminID         = "41a2c24f-8c4f-4544-bfd2-853da7a4e26c"
 )
 
 // Read/Write in storage

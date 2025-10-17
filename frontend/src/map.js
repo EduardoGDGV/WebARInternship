@@ -251,31 +251,46 @@ function cleanupCells(newRelevant) {
 
 // Stream Handlers
 function setupStreamHandlers() {
-  socket.onstreamdata = (stream) => {
-    try {
-      const payload = JSON.parse(stream.data);
-      if (payload.leave) {
-        if (payload.leave !== session.user_id) removePlayerMarker(payload.leave);
-        return;
-      }
+  socket.onstreampresence = (streampresence) => {
+    console.log("Received presence event for stream", streampresence);
+    if(streampresence.joins){
+      streampresence.joins.forEach((join) => {
+        console.log("New user joined: %o", join.user_id);
+      });
+    }
+    if(streampresence.leaves){
+      streampresence.leaves.forEach((leave) => {
+        console.log("User left: %o", leave.user_id);
+        if (leave.user_id !== session.user_id) removePlayerMarker(leave.user_id);
+      });
+    }
+  }
 
-      const { UserID, Username, Pos } = payload;
-      if (!UserID || !Username || !Pos || UserID === session.user_id) return;
+  socket.onstreamdata = async (stream) => {
+    try {
+      const { UserID, Pos } = JSON.parse(stream.data);
+      if (!UserID || !Pos || UserID === session.user_id) return;
+      const users = await client.getUsers(session, UserID);
+      if (!users || !users.users || users.users.length === 0) return;
+      const User = users.users[0];
+      const Metadata = User.metadata;
+      const Group = Metadata.group || null;
 
       const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
       const newCell = cellKey(cLat, cLon);
 
-      if (!relevantCells.has(newCell) && Pos.group != myGroup.name) return;
+      if (!relevantCells.has(newCell) && Group.name && Group.name != myGroup.name) return;
 
       if (!cellPlayers.has(newCell)) cellPlayers.set(newCell, new Set());
       cellPlayers.get(newCell).add(UserID);
       playerCell.set(UserID, newCell);
 
-      updatePlayerMarker(UserID, Username, Pos.lat, Pos.lon, Pos.group);
+      updatePlayerMarker(UserID, User.username, Pos.lat, Pos.lon, Group.name? Group.name : null);
     } catch (err) {
       console.error("Failed handling stream data:", err);
     }
   }
+
   socket.onnotification = (notification) => {
     const payload = notification.content;
 
@@ -311,9 +326,9 @@ function setupStreamHandlers() {
 }
 
 let lastUpdateTime = 0;
-const UPDATE_INTERVAL = 2000; // ms
+const UPDATE_INTERVAL = 1000; // ms
 
-function startPositionUpdates() {
+/*function startPositionUpdates() {
   if (!("geolocation" in navigator)) {
     alert("Geolocation is not supported by your browser.");
     return;
@@ -370,9 +385,9 @@ function startPositionUpdates() {
     }
   );
 }
-
+*/
 // Position Updates (OLD - for simulated testing without GPS)
-/*function startPositionUpdatesOLD() {
+function startPositionUpdates() {
   const INTERVAL_MS = 1000;
   let lat = centerLat;
   let lon = centerLon;
@@ -409,7 +424,6 @@ function startPositionUpdates() {
     }
   }, INTERVAL_MS);
 }
-*/
 
 // Main
 export async function initMap(mapDivId) {

@@ -7,8 +7,8 @@ process.on("unhandledRejection", (reason) => {
 
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 
-const NUM_BOTS = 500;       // total bots
-const BATCH_SIZE = 5;       // spawn bots per batch
+const NUM_BOTS = 200;       // total bots
+const BATCH_SIZE = 1;       // spawn bots per batch
 const CONCURRENCY_LIMIT = 20; // max bots simultaneously connecting
 const bots = [];
 let cleaningUp = false;
@@ -52,8 +52,8 @@ async function createBot(i) {
     }
 
     // Initial random position
-    let lat = -23.55742 + (Math.random() - 0.5) * 0.005;
-    let lon = -46.73034 + (Math.random() - 0.5) * 0.005;
+    let lat = -23.55574 + (Math.random() - 0.5) * 0.002;
+    let lon = -46.72980 + (Math.random() - 0.5) * 0.002;
 
     async function botLoop() {
       // Random walk
