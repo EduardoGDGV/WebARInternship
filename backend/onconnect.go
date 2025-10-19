@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+	"sync"
 
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -23,14 +24,16 @@ import (
 const (
 	GroupNamePrefix = "Group"
 	MaxGroups       = 80
-	RetryCount      = 5
-	RetryDelay      = 100 * time.Millisecond
+	LockRetryDelay     = 100 * time.Millisecond
+	LockRetryAttempts  = 5
+	MatchJoinDelay     = 200 * time.Millisecond // small delay before server-side MatchJoin to avoid races
+	BroadcastTickDelta = 2 * time.Second
 	LockCollection  = "locks"
 	JoinLockKey     = "join_lock"
 	GroupSizeKey    = "max_group_size"
 	NextGroupKey    = "next_group"
 	StreamMode      = 2
-	AdminID         = "41a2c24f-8c4f-4544-bfd2-853da7a4e26c"
+	AdminID         = "5c6f4519-0ba6-4fd2-b26d-f3639c3bf1e3"
 )
 
 // Read/Write in storage
@@ -67,27 +70,10 @@ func writeInt(nk runtime.NakamaModule, key string, value int) {
 	}
 }
 
-// Stream Helpers
-
-func rpcJoinGroup(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	userID := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-	sessionID := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
-
-	// Payload is expected to be the group name
-	groupName := payload
-
-	_, err := nk.StreamUserJoin(StreamMode, "", "", groupName, userID, sessionID, false, false, "")
-	if err != nil {
-		return "", err
-	}
-
-	return `{"ok":true}`, nil
-}
-
 // Lock Helpers
 
-func acquireLock(nk runtime.NakamaModule, key, userID string) bool {
-	for attempt := 1; attempt <= RetryCount; attempt++ {
+func acquireLock(nk runtime.NakamaModule, key string) bool {
+	for attempt := 0; attempt < LockRetryAttempts; attempt++ {
 		// Try to read current lock state
 		records, err := nk.StorageRead(context.Background(), []*runtime.StorageRead{
 			{
@@ -102,12 +88,12 @@ func acquireLock(nk runtime.NakamaModule, key, userID string) bool {
 
 		// If record exists and is locked, retry after delay
 		if len(records) > 0 && string(records[0].Value) == `{"locked":true}` {
-			time.Sleep(RetryDelay)
+			time.Sleep(LockRetryDelay)
 			continue
 		}
 
 		// Otherwise, write lock = true
-		val, _ := json.Marshal(map[string]interface{}{"locked": true})
+		val, _ := json.Marshal(map[string]bool{"locked": true})
 		_, err = nk.StorageWrite(context.Background(), []*runtime.StorageWrite{
 			{
 				Collection:      LockCollection,
@@ -118,13 +104,16 @@ func acquireLock(nk runtime.NakamaModule, key, userID string) bool {
 				PermissionWrite: 2, // public
 			},
 		})
-		return err == nil
+		if err == nil {
+			return true
+		}
+		time.Sleep(LockRetryDelay)
 	}
 	return false
 }
 
-func releaseLock(nk runtime.NakamaModule, key, userID string) {
-	val, _ := json.Marshal(map[string]interface{}{"locked": false})
+func releaseLock(nk runtime.NakamaModule, key string) {
+	val, _ := json.Marshal(map[string]bool{"locked": false})
 	_, _ = nk.StorageWrite(context.Background(), []*runtime.StorageWrite{
 		{
 			Collection:      LockCollection,
@@ -141,11 +130,11 @@ func releaseLock(nk runtime.NakamaModule, key, userID string) {
 
 func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID string, sessionID string, logger runtime.Logger) {
 	// Acquire lock so only one joiner mutates shared state at a time
-	if !acquireLock(nk, JoinLockKey, userID) {
+	if !acquireLock(nk, JoinLockKey) {
 		logger.Error("Could not acquire join lock for user %s", userID)
 		return
 	}
-	defer releaseLock(nk, JoinLockKey, userID)
+	defer releaseLock(nk, JoinLockKey)
 
 	// List all available groups
 	maxmembers := 100
@@ -154,6 +143,25 @@ func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID strin
 	if err != nil {
 		logger.Error("Error fetching groups: %v", err)
 		return
+	}
+
+	// If no groups exist, create them
+	if len(groups) == 0 {
+		logger.Info("No groups found, creating %d groups...", MaxGroups)
+		for i := 1; i <= MaxGroups; i++ {
+			name := fmt.Sprintf("%s_%d", GroupNamePrefix, i)
+			_, err := nk.GroupCreate(ctx, AdminID, name, "", "", "", "", true, map[string]interface{}{}, 100)
+			if err != nil {
+				logger.Error("Failed to create group %s: %v", name, err)
+				// continue trying others
+			}
+		}
+		// refresh list
+		groups, _, err = nk.GroupsList(ctx, "", "", &maxmembers, &open, MaxGroups, "")
+		if err != nil || len(groups) == 0 {
+			logger.Error("Failed to list groups after creation: %v", err)
+			return
+		}
 	}
 
 	// Load state from storage
@@ -187,8 +195,8 @@ func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID strin
 		logger.Error("Failed stream join for user %s: %v", userID, err)
 	}
 
-	groupdata := map[string]interface{}{
-		"group": map[string]interface{}{
+	groupdata := map[string]any{
+		"group": map[string]any{
 			"id":   groups[nextGroup].Id,
 			"name": groups[nextGroup].Name,
 		},
@@ -199,29 +207,174 @@ func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID strin
 	}
 }
 
-// Init Module
+// Global group matches for location updates distribution and management
 
-func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
-	members := 100
-	open := true
-	groups, _, err := nk.GroupsList(context.Background(), "", "", &members, &open, 100, "")
-	if err != nil {
-		return err
+type GlobalMatch struct{}
+
+type Player struct {
+	Presence  runtime.Presence
+	SessionID string
+	Position  Position
+}
+
+type MatchState struct {
+	Debug     bool
+	GroupName  string
+	Players   map[string]*Player
+	Positions map[string]Position
+	//Score     map[string]int //player scores
+}
+
+func (m *GlobalMatch) MatchInit(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, params map[string]interface{}) (interface{}, int, string) {
+	groupName, _ := params["group_name"].(string)
+	if groupName == "" {
+		groupName = "unknown_group"
 	}
+	state := &MatchState{
+		Debug:      true,
+		GroupName:  groupName,
+		Players:    make(map[string]*Player),
+		Positions:  make(map[string]Position),
+	}
+	tickRate := 1
+	label := fmt.Sprintf("match=%s", groupName)
+	logger.Info("Initialized match for %s", groupName)
+	return state, tickRate, label
+}
 
-	// If no groups found, create MaxGroups
-	if len(groups) == 0 {
-		logger.Info("No groups found, creating groups...")
-		for i := 1; i <= MaxGroups; i++ {
-			name := fmt.Sprintf("%s_%d", GroupNamePrefix, i)
-			_, err := nk.GroupCreate(context.Background(), AdminID, name, "", "", "", "", true, map[string]interface{}{
-				"items": map[string]interface{}{"test": "test"},
-			}, 100)
-			if err != nil {
-				logger.Error("Failed to create group %s: %v", name, err)
-				return err
+func (m *GlobalMatch) MatchJoinAttempt(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presence runtime.Presence, metadata map[string]string,) (interface{}, bool, string) {
+	// Allow all joins by default
+	return state, true, ""
+}
+
+func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
+	s := state.(*MatchState)
+	for _, p := range presences {
+		userID := p.GetUserId()
+		sessionID := p.GetSessionId()
+		s.Players[userID] = &Player{
+			Presence:  p,
+			SessionID: sessionID,
+			Position:  Position{0, 0},
+		}
+		logger.Info("%s joined %s", p.GetUsername(), s.GroupName)
+	}
+	return s
+}
+
+func (m *GlobalMatch) MatchLeave(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
+	s := state.(*MatchState)
+	for _, p := range presences {
+		delete(s.Players, p.GetUserId())
+		delete(s.Positions, p.GetUserId())
+		logger.Info("%s left %s", p.GetUsername(), s.GroupName)
+	}
+	return s
+}
+
+func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, messages []runtime.MatchData) interface{} {
+	s := state.(*MatchState)
+	for _, msg := range messages {
+		if msg.GetOpCode() != 1 { // only handle position updates
+			logger.Debug("Unhandled opcode %d from %s", msg.GetOpCode(), msg.GetUserId())
+			continue
+		}
+
+		userID := msg.GetUserId()
+		var newPos Position
+		if err := json.Unmarshal(msg.GetData(), &newPos); err != nil {
+			logger.Warn("Invalid pos payload from %s: %v", userID, err)
+			continue
+		}
+
+		// Check bounds
+		if newPos.Lat < -90 || newPos.Lat > 90 || newPos.Lon < -180 || newPos.Lon > 180 {
+			logger.Warn("Out-of-bounds pos from %s: %+v", userID, newPos)
+			continue
+		}
+
+
+		// Compare with previous position
+		prevPos, hasPrev := s.Positions[userID]
+		if hasPrev {
+			// reject impossible jumps
+			dLat := newPos.Lat - prevPos.Lat
+			dLon := newPos.Lon - prevPos.Lon
+			if dLat*dLat+dLon*dLon > 0.0001 {
+				logger.Warn("Invalid movement from %s: prev=%+v new=%+v", userID, prevPos, newPos)
+				continue
 			}
 		}
+
+		if !hasPrev || prevPos.Lat != newPos.Lat || prevPos.Lon != newPos.Lon {
+			// Update stored position
+			s.Positions[userID] = newPos
+			sessionID := s.Players[userID].SessionID
+
+			// Broadcast using existing stream logic
+			updatePlayerPosition(ctx, nk, userID, sessionID, newPos)
+		}
+	}
+
+	return s
+}
+
+func (m *GlobalMatch) MatchTerminate(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, graceSeconds int) interface{} {
+	logger.Info("Terminating match.")
+	return state
+}
+
+func (m *GlobalMatch) MatchSignal(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, data string) (interface{}, string) {
+	logger.Info("Signal received: %s", data)
+	return state, ""
+}
+
+// Factory function for the match
+func NewGlobalMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule) (runtime.Match, error) {
+	return &GlobalMatch{}, nil
+}
+
+// Global in-memory map (only lasts while the server process is running)
+var (
+	groupMatches   = make(map[string]string)
+	groupMatchesMu sync.RWMutex
+)
+
+// rpcGetMatch ensures a single match per group using runtime memory only.
+func rpcGetMatch(ctx context.Context, nk runtime.NakamaModule, logger runtime.Logger) (string, error) {
+	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+	groupName := getUserGroup(ctx, nk, userID)
+	if groupName == "" {
+		return "", fmt.Errorf("user %s has no group", userID)
+	}
+
+	groupMatchesMu.RLock()
+	matchID, ok := groupMatches[groupName]
+	groupMatchesMu.RUnlock()
+	if ok {
+		return matchID, nil
+	}
+
+	// not found, create new match
+	matchParams := map[string]any{"group_name": groupName}
+	newMatchID, err := nk.MatchCreate(ctx, "global_match", matchParams)
+	if err != nil {
+		return "", err
+	}
+
+	groupMatchesMu.Lock()
+	groupMatches[groupName] = newMatchID
+	groupMatchesMu.Unlock()
+
+	logger.Info("Created new match for %s -> %s", groupName, newMatchID)
+	return newMatchID, nil
+}
+
+// Init Module
+func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
+
+	if err := initializer.RegisterMatch("global_match", NewGlobalMatch); err != nil {
+		return err
 	}
 
 	if err := initializer.RegisterEventSessionStart(
@@ -232,14 +385,15 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 			if err != nil {
 				return
 			}
-			if len(groups) != 0 {
-				group := groups[0]
-				if _, err := nk.StreamUserJoin(StreamMode, "", "", group.GetGroup().Name, userID, sessionID, false, false, ""); err != nil {
-					logger.Error("Failed stream join for user %s: %v", userID, err)
-					return
-				}
-			} else {
+			if len(groups) == 0 {
 				handlePlayerJoin(ctx, nk, userID, sessionID, logger)
+				groups, _, _ = nk.UserGroupsList(ctx, userID, 1, nil, "")
+			}
+			group := groups[0]
+			userGroups[userID] = group.GetGroup().Name
+			if _, err := nk.StreamUserJoin(StreamMode, "", "", group.GetGroup().Name, userID, sessionID, false, false, ""); err != nil {
+				logger.Error("Failed stream join for user %s: %v", userID, err)
+				return
 			}
 		},
 	); err != nil {
@@ -258,7 +412,9 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		return err
 	}
 
-	if err := initializer.RegisterRpc("rpcJoinGroup", rpcJoinGroup); err != nil {
+	if err := initializer.RegisterRpc("get_match", func(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+		return rpcGetMatch(ctx, nk, logger)
+	}); err != nil {
 		logger.Error("Unable to register: %v", err)
 		return err
 	}

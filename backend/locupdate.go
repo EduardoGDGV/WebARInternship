@@ -77,6 +77,8 @@ func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) s
 		group := groups[0].Group.Name
 		userGroups[userID] = group
 		return group
+	}else{
+		fmt.Println("Error fetching user groups for user ", userID, ": ", err)
 	}
 
 	return ""
@@ -95,9 +97,7 @@ func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) s
 }*/
 
 // Core Update Function
-func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, pos Position) {
-	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-	sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
+func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, userID, sessionID string, pos Position) {
 
 	newCells := determineCells(pos.Lat, pos.Lon)
 	group := getUserGroup(ctx, nk, userID)
@@ -174,6 +174,9 @@ func rpcUpdatePosition(ctx context.Context, nk runtime.NakamaModule, payload str
 		return "", runtime.NewError("invalid coordinates", 3)
 	}
 
-	updatePlayerPosition(ctx, nk, pos)
+	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+	sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
+	//sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
+	updatePlayerPosition(ctx, nk, userID, sessionID, pos)
 	return "ok", nil
 }

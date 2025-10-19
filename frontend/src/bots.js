@@ -7,7 +7,7 @@ process.on("unhandledRejection", (reason) => {
 
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 
-const NUM_BOTS = 200;       // total bots
+const NUM_BOTS = 800;       // total bots
 const BATCH_SIZE = 1;       // spawn bots per batch
 const CONCURRENCY_LIMIT = 20; // max bots simultaneously connecting
 const bots = [];
@@ -62,7 +62,16 @@ async function createBot(i) {
 
       if (cleaningUp || socketClosed) return;
       try {
-        await socket.rpc("update_position", JSON.stringify({ lat, lon }));
+        if (!socket) return;
+        const res = await socket.rpc("get_match");
+        if (!res) return;
+        const matchID = res.payload;
+        console.log("Joining match:", matchID);
+        if (!matchID) return;
+        await socket.joinMatch(matchID);
+        //await socket.rpc("update_position", JSON.stringify({ lat, lon }));
+        var opCode = 1;
+        socket.sendMatchState(matchID, opCode, JSON.stringify({ lat, lon }));
       } catch (e) {
         console.error(`Bot ${i} failed sending position:`, e);
       }
@@ -127,5 +136,5 @@ process.on("SIGINT", cleanupBots);
 (async () => {
   await spawnBots();
   // Auto-cleanup after 80s
-  setTimeout(cleanupBots, 80000);
+  setTimeout(cleanupBots, 160000);
 })();

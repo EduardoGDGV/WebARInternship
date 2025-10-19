@@ -23,6 +23,8 @@ import L from "leaflet";
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 let session = null;
 let socket = null;
+let matchID = null;
+let match = null;
 
 let myMarker = null;
 let myGroup = null;
@@ -419,7 +421,9 @@ function startPositionUpdates() {
 
     try {
       const payload = { lat, lon };
-      await socket.rpc("update_position", JSON.stringify(payload));
+      //await socket.rpc("update_position", JSON.stringify(payload));
+      var opCode = 1;
+      socket.sendMatchState(matchID, opCode, JSON.stringify(payload));
     } catch (e) {
       console.error("Failed sending position update", e);
     }
@@ -430,6 +434,14 @@ function startPositionUpdates() {
 export async function initMap(mapDivId) {
   await initSession();
   await initSocket();
+  
+  if (!socket) return;
+  const res = await socket.rpc("get_match");
+  if (!res) return;
+  matchID = res.payload;
+  console.log("Joining match:", matchID);
+  if (!matchID) return;
+  await socket.joinMatch(matchID);
 
   const map = initLeaflet(mapDivId);
   await addBuildingsToMap(map);
