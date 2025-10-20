@@ -221,7 +221,6 @@ type MatchState struct {
 	Debug     bool
 	GroupName  string
 	Players   map[string]*Player
-	Positions map[string]Position
 	//Score     map[string]int //player scores
 }
 
@@ -234,7 +233,6 @@ func (m *GlobalMatch) MatchInit(ctx context.Context, logger runtime.Logger, db *
 		Debug:      true,
 		GroupName:  groupName,
 		Players:    make(map[string]*Player),
-		Positions:  make(map[string]Position),
 	}
 	tickRate := 1
 	label := fmt.Sprintf("match=%s", groupName)
@@ -255,7 +253,7 @@ func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *
 		s.Players[userID] = &Player{
 			Presence:  p,
 			SessionID: sessionID,
-			Position:  Position{0, 0},
+			Position:  Position{Lat: 0, Lon: 0},
 		}
 		logger.Info("%s joined %s", p.GetUsername(), s.GroupName)
 	}
@@ -266,57 +264,61 @@ func (m *GlobalMatch) MatchLeave(ctx context.Context, logger runtime.Logger, db 
 	s := state.(*MatchState)
 	for _, p := range presences {
 		delete(s.Players, p.GetUserId())
-		delete(s.Positions, p.GetUserId())
 		logger.Info("%s left %s", p.GetUsername(), s.GroupName)
 	}
 	return s
 }
 
 func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, messages []runtime.MatchData) interface{} {
-	s := state.(*MatchState)
-	for _, msg := range messages {
-		if msg.GetOpCode() != 1 { // only handle position updates
-			logger.Debug("Unhandled opcode %d from %s", msg.GetOpCode(), msg.GetUserId())
-			continue
-		}
+	s, ok := state.(*MatchState)
+    if !ok || s == nil {
+        logger.Error("Invalid match state")
+        return state
+    }
 
-		userID := msg.GetUserId()
-		var newPos Position
-		if err := json.Unmarshal(msg.GetData(), &newPos); err != nil {
-			logger.Warn("Invalid pos payload from %s: %v", userID, err)
-			continue
-		}
+    for _, msg := range messages {
+        if msg.GetOpCode() != 1 {
+            continue
+        }
 
-		// Check bounds
-		if newPos.Lat < -90 || newPos.Lat > 90 || newPos.Lon < -180 || newPos.Lon > 180 {
-			logger.Warn("Out-of-bounds pos from %s: %+v", userID, newPos)
-			continue
-		}
+        userID := msg.GetUserId()
+        player, ok := s.Players[userID]
+        if !ok {
+            logger.Warn("Message from unknown player: %s", userID)
+            continue
+        }
 
+        var newPos Position
+        if err := json.Unmarshal(msg.GetData(), &newPos); err != nil {
+            logger.Warn("Invalid pos payload from %s: %v", userID, err)
+            continue
+        }
 
-		// Compare with previous position
-		prevPos, hasPrev := s.Positions[userID]
-		if hasPrev {
-			// reject impossible jumps
+        // Sanity checks
+        if newPos.Lat < -90 || newPos.Lat > 90 || newPos.Lon < -180 || newPos.Lon > 180 {
+            logger.Warn("Out-of-bounds pos from %s: %+v", userID, newPos)
+            continue
+        }
+
+        // Compare to previous
+		if player.Position.Lat != 0 || player.Position.Lon != 0 {
+        	prevPos := player.Position
 			dLat := newPos.Lat - prevPos.Lat
 			dLon := newPos.Lon - prevPos.Lon
-			if dLat*dLat+dLon*dLon > 0.0001 {
+			distance := dLat*dLat+dLon*dLon
+			if distance > 0.0001 {
 				logger.Warn("Invalid movement from %s: prev=%+v new=%+v", userID, prevPos, newPos)
 				continue
 			}
+			if distance < 0.00001 {
+				continue // negligible movement
+			}
 		}
+        player.Position = newPos
+        updatePlayerPosition(ctx, nk, userID, player.SessionID, newPos)
+    }
 
-		if !hasPrev || prevPos.Lat != newPos.Lat || prevPos.Lon != newPos.Lon {
-			// Update stored position
-			s.Positions[userID] = newPos
-			sessionID := s.Players[userID].SessionID
-
-			// Broadcast using existing stream logic
-			updatePlayerPosition(ctx, nk, userID, sessionID, newPos)
-		}
-	}
-
-	return s
+    return s
 }
 
 func (m *GlobalMatch) MatchTerminate(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, graceSeconds int) interface{} {

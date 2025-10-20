@@ -55,6 +55,14 @@ async function createBot(i) {
     let lat = -23.55574 + (Math.random() - 0.5) * 0.002;
     let lon = -46.72980 + (Math.random() - 0.5) * 0.002;
 
+    if (!socket) return;
+    const res = await socket.rpc("get_match");
+    if (!res) return;
+    const matchID = res.payload;
+    console.log(`Bot ${i} joining match:`, matchID);
+    if (!matchID) return;
+    await socket.joinMatch(matchID);
+
     async function botLoop() {
       // Random walk
       lat += (Math.random() - 0.5) * 0.0002;
@@ -62,13 +70,6 @@ async function createBot(i) {
 
       if (cleaningUp || socketClosed) return;
       try {
-        if (!socket) return;
-        const res = await socket.rpc("get_match");
-        if (!res) return;
-        const matchID = res.payload;
-        console.log("Joining match:", matchID);
-        if (!matchID) return;
-        await socket.joinMatch(matchID);
         //await socket.rpc("update_position", JSON.stringify({ lat, lon }));
         var opCode = 1;
         socket.sendMatchState(matchID, opCode, JSON.stringify({ lat, lon }));
