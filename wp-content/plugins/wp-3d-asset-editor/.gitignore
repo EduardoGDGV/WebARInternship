@@ -28,7 +28,7 @@ dist-ssr/
 # ----------------------------
 
 # Runtime-generated content
-wp-content/uploads/
+#wp-content/uploads/
 wp-content/upgrade/
 wp-content/cache/
 

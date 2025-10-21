@@ -6,13 +6,28 @@ return array(
 		'name' => 'wp-3d-asset-editor/block',
 		'title' => '3D Shared Scene',
 		'category' => 'widgets',
-		'icon' => 'media',
+		'icon' => 'dashicons-cover-image',
+		'description' => 'Editable 3D scene for previewing game assets on the map.',
+		'keywords' => array(
+			'3d',
+			'babylon',
+			'leaflet',
+			'model'
+		),
+		'version' => '1.0.0',
 		'supports' => array(
+			'align' => array(
+				'wide',
+				'full'
+			),
 			'html' => false
 		),
 		'attributes' => array(
 			'blockAssetId' => array(
-				'type' => 'number',
+				'type' => array(
+					'number',
+					'null'
+				),
 				'default' => null
 			),
 			'assetUrl' => array(
@@ -45,7 +60,7 @@ return array(
 			)
 		),
 		'editorScript' => 'file:./index.js',
-		'editorStyle' => 'file:./editor.css',
-		'style' => 'file:./style.css'
+		'editorStyle' => 'file:./style-index.css',
+		'style' => 'file:./style-index.css'
 	)
 );

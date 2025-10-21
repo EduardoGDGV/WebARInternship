@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WP 3D Asset Editor
  * Description: Manage 3D assets with positions and rotations via Gutenberg + Babylon.js.
- * Version: 1.4.0
+ * Version: 2.0.0
  * Author: EduardoGDGV
  */
 
@@ -23,7 +23,7 @@ function wp3d_register_cpt_and_meta() {
         'show_in_rest' => true,
         'rest_base'    => '3d_asset',
         'supports'     => ['title', 'custom-fields'],
-        'menu_icon'    => 'dashicons-cube',
+        'menu_icon'    => 'dashicons-cover-image',
     ]);
 
     // String field

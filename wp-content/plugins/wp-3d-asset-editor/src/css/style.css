@@ -1,0 +1,32 @@
+.wp-3d-asset-editor {
+    font-family: var(--wp--preset--font-family--system-ui, system-ui, sans-serif);
+}
+
+.editor-header {
+    margin-top: 12px;
+}
+
+.editor-header strong {
+    display: block;
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+
+.editor-header p {
+    margin-top: 2px;
+    font-size: 12px;
+    color: #666;
+}
+
+.editor-preview {
+    margin-top: 12px;
+}
+
+.asset-canvas {
+    width: 100%;
+    max-width: 900px;
+    height: auto;
+    border: 1px solid #ddd;
+    display: block;
+    background: #f9f9f9;
+}
