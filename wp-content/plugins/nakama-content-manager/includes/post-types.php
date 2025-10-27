@@ -1,107 +1,317 @@
 <?php
 if (!defined('ABSPATH')) exit;
 
-add_action('init', function() {
+add_action('init', 'nakama_register_post_types');
+function nakama_register_post_types() {
 
-    // EVENT (map anchor)
+    // Event
     register_post_type('event', [
         'label' => 'Events',
         'public' => true,
+        'show_ui' => true,
         'show_in_rest' => true,
-        'supports' => ['title', 'thumbnail', 'custom-fields', 'editor'],
+        'supports' => ['title'],
     ]);
 
     register_post_meta('event', 'lat', [
-        'type' => 'number',
-        'single' => true,
-        'show_in_rest' => true,
-        'auth_callback' => function() { return current_user_can('edit_posts'); }
+        'type' => 'number', 'single' => true, 'show_in_rest' => true,
     ]);
     register_post_meta('event', 'lon', [
-        'type' => 'number',
-        'single' => true,
-        'show_in_rest' => true,
-        'auth_callback' => function() { return current_user_can('edit_posts'); }
+        'type' => 'number', 'single' => true, 'show_in_rest' => true,
     ]);
-
-    // direct image for event marker (attachment ID)
-    register_post_meta('event', 'marker_image', [
-        'type' => 'integer',
-        'single' => true,
-        'show_in_rest' => true,
-        'auth_callback' => function() { return current_user_can('edit_posts'); }
+    register_post_meta('event', 'image', [
+        'type' => 'integer', 'single' => true, 'show_in_rest' => true,
     ]);
-
-    // Unified relationships (typed arrays)
     register_post_meta('event', 'requirements', [
-        'type' => 'array',
-        'single' => true,
-        'show_in_rest' => [
-            'schema' => [
-                'type' => 'array',
-                'items' => ['type' => 'integer']
-            ]
-        ],
-        'auth_callback' => function() { return current_user_can('edit_posts'); }
+        'type' => 'array', 'single' => true,
+        'show_in_rest' => ['schema' => ['type' => 'array', 'items' => ['type' => 'integer']]]
     ]);
-
     register_post_meta('event', 'rewards', [
-        'type' => 'array',
-        'single' => true,
-        'show_in_rest' => [
-            'schema' => [
-                'type' => 'array',
-                'items' => ['type' => 'integer']
-            ]
-        ],
-        'auth_callback' => function() { return current_user_can('edit_posts'); }
+        'type' => 'array', 'single' => true,
+        'show_in_rest' => ['schema' => ['type' => 'array', 'items' => ['type' => 'integer']]]
     ]);
 
-    // ASSET2D (visual resource only)
+    // 2D Asset
     register_post_type('asset2d', [
         'label' => '2D Assets',
         'public' => true,
+        'show_ui' => true,
         'show_in_rest' => true,
-        'supports' => ['title', 'thumbnail', 'custom-fields'],
+        'supports' => ['title'],
     ]);
     register_post_meta('asset2d', 'image', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
 
-    // CARD
+    // Card
     register_post_type('card', [
         'label' => 'Cards',
         'public' => true,
+        'show_ui' => true,
         'show_in_rest' => true,
-        'supports' => ['title', 'thumbnail', 'custom-fields'],
+        'supports' => ['title'],
     ]);
     register_post_meta('card', 'front_image', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
     register_post_meta('card', 'back_image', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
-    register_post_meta('card', 'is_group', ['type' => 'boolean', 'single' => true, 'show_in_rest' => true, 'default' => false]);
+    register_post_meta('card', 'group_card', ['type' => 'boolean', 'single' => true, 'default' => false, 'show_in_rest' => true]);
 
-    // ITEM
+    // Item
     register_post_type('item', [
         'label' => 'Items',
         'public' => true,
+        'show_ui' => true,
         'show_in_rest' => true,
-        'supports' => ['title', 'thumbnail', 'custom-fields'],
+        'supports' => ['title'],
     ]);
     register_post_meta('item', 'image_2d', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
     register_post_meta('item', 'image_3d', ['type' => 'string', 'single' => true, 'show_in_rest' => true]);
 
-    // QUIZ
+    // Quiz
     register_post_type('quiz', [
         'label' => 'Quizzes',
         'public' => true,
+        'show_ui' => true,
         'show_in_rest' => true,
-        'supports' => ['title', 'custom-fields'],
+        'supports' => ['title'],
     ]);
     register_post_meta('quiz', 'question', ['type' => 'string', 'single' => true, 'show_in_rest' => true]);
     register_post_meta('quiz', 'alternatives', [
-        'type' => 'array',
-        'single' => true,
+        'type' => 'array', 'single' => true,
         'show_in_rest' => [
-            'schema' => ['type' => 'array', 'items' => ['type' => 'string']]
+            'schema' => [
+                'type' => 'array',
+                'items' => ['type' => 'string'],
+            ]
         ]
     ]);
     register_post_meta('quiz', 'answer', ['type' => 'string', 'single' => true, 'show_in_rest' => true]);
+}
 
+
+/**
+ * Add a single Meta Box UI for each type
+ */
+add_action('add_meta_boxes', function() {
+    $types = ['event', 'card', 'item', 'quiz', 'asset2d'];
+    foreach ($types as $type) {
+        add_meta_box('nakama_meta', 'Nakama Settings', 'nakama_render_meta_box', $type, 'normal', 'default');
+    }
+});
+
+
+/**
+ * Meta Box Renderer
+ */
+function nakama_render_meta_box($post) {
+    wp_nonce_field('nakama_meta_save', 'nakama_meta_nonce');
+
+    $type = get_post_type($post);
+
+    // All selectable related posts (card, item, quiz)
+    $selectable = get_posts([
+        'post_type' => ['card', 'item', 'quiz'],
+        'numberposts' => -1,
+        'orderby' => 'title',
+        'order' => 'ASC'
+    ]);
+
+    ?>
+    <style>
+        .nak-row { margin-bottom: 12px; }
+        .nak-label { font-weight:bold; display:block; margin-bottom:4px; }
+    </style>
+    <?php
+
+    if ($type === 'event') {
+        nak_input('lat', $post);
+        nak_input('lon', $post);
+        nak_media('image', $post);
+
+        $req_ids = get_post_meta($post->ID,'requirements',true) ?: [];
+        $rew_ids = get_post_meta($post->ID,'rewards',true) ?: [];
+
+        echo '<div class="nak-row">';
+        echo '<label class="nak-label">Requirements</label>';
+        echo '<div class="nakama-multi-select" data-meta-key="requirements" data-types="item,quiz" data-meta-value="No assets to select..."'.esc_attr(implode(',',$req_ids)).'"></div>';
+        echo '</div>';
+
+        echo '<div class="nak-row">';
+        echo '<label class="nak-label">Rewards</label>';
+        echo '<div class="nakama-multi-select" data-meta-key="rewards" data-types="item,card" data-meta-value="No assets to select..."'.esc_attr(implode(',',$rew_ids)).'"></div>';
+        echo '</div>';
+    }
+
+    if ($type === 'card') {
+        nak_media('front_image', $post);
+        nak_media('back_image', $post);
+        nak_checkbox('group_card', $post);
+    }
+
+    if ($type === 'item') {
+        nak_media('image_2d', $post, '2D Image');
+        nak_input('image_3d', $post, '3D Asset');
+    }
+
+    if ($type === 'quiz') {
+        nak_textarea('question', $post);
+
+        $alts = get_post_meta($post->ID, 'alternatives', true) ?: ['', '', '', ''];
+        $letters = ['A', 'B', 'C', 'D'];
+        $saved_answer = get_post_meta($post->ID, 'answer', true);
+
+        echo "<div class='nak-row'><label class='nak-label'>Alternatives</label>";
+        foreach ($letters as $i => $label) {
+            $value = esc_attr($alts[$i] ?? '');
+            $checked = checked($saved_answer, $label, false);
+            echo "
+            <div style='margin-bottom:6px;'>
+                <label><strong>{$label}:</strong></label>
+                <input type='text' name='alt{$label}' value='{$value}' style='width:60%;' />
+                <label style='margin-left:10px;'>
+                    <input type='radio' name='correct' value='{$label}' {$checked}> Correct
+                </label>
+            </div>";
+        }
+        echo "</div>";
+
+        // Read-only display of correct answer
+        echo "<div class='nak-row'>
+                <label class='nak-label'>Correct Answer</label>
+                <input type='text' name='answer' value='".esc_attr($saved_answer)."' class='widefat' readonly />
+            </div>";
+    }
+
+    if ($type === 'asset2d') {
+        nak_media('image', $post);
+    }
+}
+
+
+/**
+ * Field helpers
+ */
+function nak_input($key, $post, $label = null) {
+    $label = $label ?: ucfirst($key);
+    $val = esc_attr(get_post_meta($post->ID, $key, true));
+    echo "<div class='nak-row'><label class='nak-label'>{$label}</label><input type='text' name='{$key}' value='{$val}' class='widefat' /></div>";
+}
+
+function nak_checkbox($key, $post) {
+    $val = get_post_meta($post->ID, $key, true);
+    echo "<div class='nak-row'><label><input type='checkbox' name='{$key}' value='1' ".checked($val,true,false)." /> {$key}</label></div>";
+}
+
+function nak_textarea($key, $post) {
+    $val = esc_textarea(get_post_meta($post->ID, $key, true));
+    echo "<div class='nak-row'><label class='nak-label'>{$key}</label><textarea name='{$key}' rows='3' class='widefat'>{$val}</textarea></div>";
+}
+
+function nak_textarea_csv($key, $post, $label) {
+    $vals = get_post_meta($post->ID, $key, true) ?: [];
+    $val = esc_textarea(implode("\n", (array)$vals));
+    echo "<div class='nak-row'><label class='nak-label'>{$label}</label><textarea name='{$key}' rows='4' class='widefat'>{$val}</textarea></div>";
+}
+
+function nak_multi_select($key, $post, $posts) {
+    $selected = get_post_meta($post->ID, $key, true) ?: [];
+    echo "<div class='nak-row'><label class='nak-label'>{$key}</label><select name='{$key}[]' multiple class='widefat' style='min-height:120px;'>";
+    foreach ($posts as $p) {
+        $sel = selected(in_array($p->ID, $selected), true, false);
+        echo "<option value='{$p->ID}' {$sel}>{$p->post_title} ({$p->post_type})</option>";
+    }
+    echo "</select></div>";
+}
+
+function nak_media($key, $post, $type = 'image') {
+    $id_or_url = get_post_meta($post->ID, $key, true);
+    $attachment_url = $id_or_url ? wp_get_attachment_url($id_or_url) : '';
+
+    // Allowed formats
+    $img_ext = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+    $model_ext = ['glb', 'gltf'];
+
+    $ext = $attachment_url ? strtolower(pathinfo($attachment_url, PATHINFO_EXTENSION)) : '';
+
+    // Only show preview if image
+    $can_preview = in_array($ext, $img_ext);
+
+    ?>
+    <div class="nak-row">
+        <label class="nak-label"><?= ucfirst($key) ?></label>
+
+        <input type="hidden" name="<?= $key ?>" value="<?= esc_attr($id_or_url) ?>" />
+
+        <button type="button" class="button nak-media-btn"
+                data-target="<?= $key ?>"
+                data-type="<?= esc_attr($type) ?>">
+            Select File
+        </button>
+
+        <?php if ($attachment_url): ?>
+            <?php if ($can_preview): ?>
+                <div><img src="<?= esc_url($attachment_url) ?>" style="max-width:200px; margin-top:6px;" /></div>
+            <?php else: ?>
+                <div style="margin-top:6px; font-style:italic;">
+                    File: <?= basename($attachment_url) ?>
+                </div>
+            <?php endif; ?>
+        <?php endif; ?>
+
+        <?php if ($type === '3d'): ?>
+            <p style="font-size:11px; color:#555;">
+                Allowed: *.glb, *.gltf
+            </p>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+
+/**
+ * Save callback
+ */
+add_action('save_post', function($post_id) {
+    if (!isset($_POST['nakama_meta_nonce']) ||
+        !wp_verify_nonce($_POST['nakama_meta_nonce'], 'nakama_meta_save')) return;
+    if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
+
+    $type = get_post_type($post_id);
+
+    if ($type === 'quiz') {
+        $letters = ['A', 'B', 'C', 'D'];
+        $alts = [];
+        foreach ($letters as $label) {
+            if(isset($_POST['alt'.$label])) {
+                $alts[] = sanitize_text_field($_POST['alt'.$label]);
+            }
+        }
+        update_post_meta($post_id, 'alternatives', $alts);
+
+        if(isset($_POST['correct'])) {
+            update_post_meta($post_id, 'answer', sanitize_text_field($_POST['correct']));
+        }
+
+        if(isset($_POST['question'])) {
+            update_post_meta($post_id, 'question', sanitize_text_field($_POST['question']));
+        }
+
+        return; // Stop here for quiz, don't update unrelated fields
+    }
+
+    $fields = ['lat','lon','image','front_image','back_image',
+        'image_2d','image_3d','question','answer'];
+
+    foreach ($fields as $f) {
+        if (isset($_POST[$f])) update_post_meta($post_id,$f,sanitize_text_field($_POST[$f]));
+    }
+
+    // Boolean
+    update_post_meta($post_id,'group_card', isset($_POST['group_card']));
+
+    // Multi selects
+    foreach (['requirements','rewards'] as $arr) {
+        if (isset($_POST[$arr])) {
+            update_post_meta($post_id,$arr,array_map('intval',$_POST[$arr]));
+        } else {
+            delete_post_meta($post_id,$arr);
+        }
+    }
 });

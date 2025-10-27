@@ -31,7 +31,7 @@ function nakama_notify_save($post_id, $post, $update) {
                 "lon" => is_numeric($lon_meta) ? floatval($lon_meta) : 0.0,
             ];
             // marker image (attachment -> url)
-            $payload['image'] = nakama_get_image_url(get_post_meta($post_id, 'marker_image', true));
+            $payload['image'] = nakama_get_image_url(get_post_meta($post_id, 'image', true));
 
             // unified relations (always arrays)
             $payload['requirements'] = get_post_meta($post_id, 'requirements', true) ?: [];
@@ -47,7 +47,7 @@ function nakama_notify_save($post_id, $post, $update) {
                 "front" => nakama_get_image_url(get_post_meta($post_id, 'front_image', true)),
                 "back"  => nakama_get_image_url(get_post_meta($post_id, 'back_image', true)),
             ];
-            $payload['is_group'] = (bool)get_post_meta($post_id, 'is_group', true);
+            $payload['group_card'] = (bool)get_post_meta($post_id, 'group_card', true);
             break;
 
         case 'item':
