@@ -53,7 +53,7 @@ function nakama_notify_save($post_id, $post, $update) {
         case 'item':
             $payload['images'] = [
                 "2d" => nakama_get_image_url(get_post_meta($post_id, 'image_2d', true)),
-                "3d" => get_post_meta($post_id, 'image_3d', true),
+                "3d" => nakama_get_image_url(get_post_meta($post_id, 'image_3d', true)),
             ];
             break;
 
@@ -87,7 +87,7 @@ function nakama_send_payload($payload) {
             'Content-Type' => 'application/json',
             'Accept' => 'application/json'
         ],
-        'body' => json_encode($payload, JSON_UNESCAPED_SLASHES),
+        'body' => json_encode(json_encode($payload, JSON_UNESCAPED_SLASHES)),
         'method' => 'POST',
         'timeout' => 10,
         'data_format' => 'body',
