@@ -294,6 +294,40 @@ function setupStreamHandlers() {
     }
   }
 
+  socket.onmatchdata = async (matchData) => {
+    try {
+      const opCode = matchData.op_code;
+      const data = JSON.parse(new TextDecoder().decode(matchData.data));
+
+      console.log("Decoded match data:", data);
+      const UserID = data.user_id;
+      const Pos = { lat: data.lat, lon: data.lon };
+      // handle position updates
+      if (opCode === 1) {
+        if (!UserID || !Pos || UserID === session.user_id) return;
+        const users = await client.getUsers(session, UserID);
+        if (!users || !users.users || users.users.length === 0) return;
+        const User = users.users[0];
+        const Metadata = User.metadata;
+        const Group = Metadata.group || null;
+
+        const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
+        const newCell = cellKey(cLat, cLon);
+
+        if (!relevantCells.has(newCell) && Group.name && Group.name != myGroup.name) return;
+
+        if (!cellPlayers.has(newCell)) cellPlayers.set(newCell, new Set());
+        cellPlayers.get(newCell).add(UserID);
+        playerCell.set(UserID, newCell);
+
+        updatePlayerMarker(UserID, User.username, Pos.lat, Pos.lon, Group.name? Group.name : null);
+      }
+
+    } catch (err) {
+      console.error("Error decoding match data:", err);
+    }
+  }
+
   socket.onnotification = (notification) => {
     const payload = notification.content;
 

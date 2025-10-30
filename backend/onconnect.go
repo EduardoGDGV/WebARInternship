@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"time"
 	"sync"
+	"math"
 
 	"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -208,7 +209,6 @@ func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID strin
 }
 
 // Global group matches for location updates distribution and management
-
 type GlobalMatch struct{}
 
 type Player struct {
@@ -222,6 +222,20 @@ type MatchState struct {
 	GroupName  string
 	Players   map[string]*Player
 	//Score     map[string]int //player scores
+}
+
+func distanceMeters(a, b Position) float64 {
+    const R = 6371000.0 // Earth radius in meters
+    dLat := (b.Lat - a.Lat) * math.Pi / 180.0
+    dLon := (b.Lon - a.Lon) * math.Pi / 180.0
+
+    lat1 := a.Lat * math.Pi / 180.0
+    lat2 := b.Lat * math.Pi / 180.0
+
+    h := math.Sin(dLat/2)*math.Sin(dLat/2) +
+        math.Sin(dLon/2)*math.Sin(dLon/2)*math.Cos(lat1)*math.Cos(lat2)
+    c := 2 * math.Atan2(math.Sqrt(h), math.Sqrt(1-h))
+    return R * c
 }
 
 func (m *GlobalMatch) MatchInit(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, params map[string]interface{}) (interface{}, int, string) {
@@ -303,19 +317,25 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
         // Compare to previous
 		if player.Position.Lat != 0 || player.Position.Lon != 0 {
         	prevPos := player.Position
-			dLat := newPos.Lat - prevPos.Lat
-			dLon := newPos.Lon - prevPos.Lon
-			distance := dLat*dLat+dLon*dLon
-			if distance > 0.0001 {
+			distance := distanceMeters(prevPos, newPos)
+			if distance > 30 {
 				logger.Warn("Invalid movement from %s: prev=%+v new=%+v", userID, prevPos, newPos)
 				continue
 			}
-			if distance < 0.00001 {
+			if distance < 1 {
+				logger.Warn("Negligible movement from %s: prev=%+v new=%+v", userID, prevPos, newPos)
 				continue // negligible movement
 			}
 		}
+
         player.Position = newPos
-        updatePlayerPosition(ctx, nk, userID, player.SessionID, newPos)
+		data, _ := json.Marshal(map[string]any{
+			"user_id": userID,
+			"lat": newPos.Lat,
+			"lon": newPos.Lon,
+		})
+		dispatcher.BroadcastMessage(1, data, nil, nil, false)
+        updatePlayerPosition(nk, userID, player.SessionID, newPos)
     }
 
     return s
@@ -402,22 +422,14 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		return err
 	}
 
-	if err := InitBuildings(ctx, logger, db, nk, initializer); err != nil {
-		logger.Error("Failed to init buildings module: %v", err)
-		return err
-	}
-
-	if err := initializer.RegisterRpc("update_position", func(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-		return rpcUpdatePosition(ctx, nk, payload)
-	}); err != nil {
-		logger.Error("Unable to register: %v", err)
-		return err
-	}
-
 	if err := initializer.RegisterRpc("get_match", func(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
 		return rpcGetMatch(ctx, nk, logger)
 	}); err != nil {
 		logger.Error("Unable to register: %v", err)
+		return err
+	}
+
+	if err := InitContentSync(ctx, logger, db, nk, initializer); err != nil {
 		return err
 	}
 

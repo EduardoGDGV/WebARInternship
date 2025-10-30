@@ -14,12 +14,12 @@ import (
 
 // Compact binary position
 type Position struct {
-	Lat float32 `json:"lat"`
-	Lon float32 `json:"lon"`
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
 }
 
 // Each stream cell covers ~100 meters
-const CELL_SIZE float32 = 0.001
+const CELL_SIZE float64 = 0.001
 
 // Caches
 var (
@@ -29,16 +29,16 @@ var (
 )
 
 // Helpers
-func cellKey(lat, lon float32) string {
+func cellKey(lat, lon float64) string {
 	return fmt.Sprintf("%.5f,%.5f", lat, lon)
 }
 
-func getCell(lat, lon float32) (float32, float32) {
-	return float32(math.Floor(float64(lat/CELL_SIZE)) * float64(CELL_SIZE)),
-		float32(math.Floor(float64(lon/CELL_SIZE)) * float64(CELL_SIZE))
+func getCell(lat, lon float64) (float64 , float64) {
+	return float64(math.Floor(float64(lat/CELL_SIZE)) * float64(CELL_SIZE)),
+		float64(math.Floor(float64(lon/CELL_SIZE)) * float64(CELL_SIZE))
 }
 
-func determineCells(lat, lon float32) []string {
+func determineCells(lat, lon float64) []string {
 	baseLat, baseLon := getCell(lat, lon)
 	offsetLat := lat - baseLat
 	offsetLon := lon - baseLon
@@ -84,23 +84,9 @@ func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) s
 	return ""
 }
 
-// EncodePosition packs a Position struct into 8 bytes
-/*func EncodePosition(pos Position) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	if err := binary.Write(buf, binary.LittleEndian, pos.Lat); err != nil {
-		return nil, err
-	}
-	if err := binary.Write(buf, binary.LittleEndian, pos.Lon); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}*/
-
 // Core Update Function
-func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, userID, sessionID string, pos Position) {
-
+func updatePlayerPosition(nk runtime.NakamaModule, userID, sessionID string, pos Position) {
 	newCells := determineCells(pos.Lat, pos.Lon)
-	group := getUserGroup(ctx, nk, userID)
 
 	cellLock.Lock()
 	defer cellLock.Unlock()
@@ -154,29 +140,4 @@ func updatePlayerPosition(ctx context.Context, nk runtime.NakamaModule, userID, 
 	if err := nk.StreamSend(StreamMode, "", "", realCell, string(posJSON), nil, false); err != nil {
 		fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
 	}
-
-	// Broadcast to group if applicable
-	if group != "" {
-		if err := nk.StreamSend(StreamMode, "", "", group, string(posJSON), nil, false); err != nil {
-			fmt.Printf("Failed stream send for user %s: %v\n", userID, err)
-		}
-	}
-}
-
-// RPC Handler
-func rpcUpdatePosition(ctx context.Context, nk runtime.NakamaModule, payload string) (string, error) {
-	var pos Position
-	if err := json.Unmarshal([]byte(payload), &pos); err != nil {
-		return "", runtime.NewError("invalid payload", 3)
-	}
-
-	if pos.Lat < -90 || pos.Lat > 90 || pos.Lon < -180 || pos.Lon > 180 {
-		return "", runtime.NewError("invalid coordinates", 3)
-	}
-
-	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-	sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
-	//sessionID, _ := ctx.Value(runtime.RUNTIME_CTX_SESSION_ID).(string)
-	updatePlayerPosition(ctx, nk, userID, sessionID, pos)
-	return "ok", nil
 }

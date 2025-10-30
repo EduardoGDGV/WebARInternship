@@ -4,295 +4,750 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
-// WordPress structs
-type WPPost struct {
-	ID   int                    `json:"id"`
-	ACF  map[string]interface{} `json:"acf"`
-	Link string                 `json:"link"`
-	Slug string                 `json:"slug"`
+// Configuration
+const wpBase = "http://wordpress:80/wp-json/wp/v2" // WordPress base REST URL
+const httpTimeout = 10 * time.Second
+
+// Storage collections
+var collectionByType = map[string]string{
+	"event":   "events",
+	"asset2d": "assets2d",
+	"card":    "cards",
+	"item":    "items",
+	"quiz":    "quizzes",
 }
 
-type WPMedia struct {
+// Data structures (payloads / storage models)
+
+// Event (map anchor + relations)
+type Event struct {
+	ID           int     `json:"id"`
+	Title        string  `json:"title"`
+	Lat          float64 `json:"lat"`
+	Lon          float64 `json:"lon"`
+	Image        string  `json:"image"`        // resolved URL (may be empty)
+	Requirements []int   `json:"requirements"` // IDs
+	Rewards      []int   `json:"rewards"`      // IDs
+	UpdatedAt    string  `json:"updated_at,omitempty"`
+}
+
+// Asset2D (visual resource)
+type Asset2D struct {
 	ID        int    `json:"id"`
-	SourceURL string `json:"source_url"`
+	Title     string `json:"title"`
+	Image     string `json:"image"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
-// Nakama Building struct
-type Building struct {
-	ID    int     `json:"id"`
-	Lat   float64 `json:"lat"`
-	Lon   float64 `json:"lon"`
-	Image string  `json:"image"`
+// Card
+type Card struct {
+	ID        int    `json:"id"`
+	Title     string `json:"title"`
+	Front     string `json:"front"` // resolved URLs
+	Back      string `json:"back"`
+	GroupCard bool   `json:"group_card"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
-// WordPress endpoints
-const wpCategoryID = 3
-const wpPostsURL = "http://wordpress:80/wp-json/wp/v2/posts/?categories=%d&per_page=100"
-const wpMediaURL = "http://wordpress:80/wp-json/wp/v2/media/%d"
-
-// Fetch image URL from WordPress media ID
-func fetchImageURL(id float64) (string, error) {
-	mediaID := int(id)
-	url := fmt.Sprintf(wpMediaURL, mediaID)
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", fmt.Errorf("error fetching media: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := ioutil.ReadAll(resp.Body)
-
-	var media WPMedia
-	if err := json.Unmarshal(body, &media); err != nil {
-		return "", fmt.Errorf("error unmarshalling media: %w", err)
-	}
-
-	return media.SourceURL, nil
+// Item
+type Item struct {
+	ID        int    `json:"id"`
+	Title     string `json:"title"`
+	Image2D   string `json:"image_2d"`
+	Image3D   string `json:"image_3d"` // could be URL or file name
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
-// Fetch all buildings from WordPress and return as []Building
-func fetchBuildingsFromWP(logger runtime.Logger) ([]Building, error) {
-	url := fmt.Sprintf(wpPostsURL, wpCategoryID)
-	logger.Info("Fetching WP posts from %s", url)
+// Quiz
+type Quiz struct {
+	ID           int      `json:"id"`
+	Title        string   `json:"title"`
+	Question     string   `json:"question"`
+	Alternatives []string `json:"alternatives"` // always array length 4
+	Answer       string   `json:"answer"`       // "A"|"B"|"C"|"D"
+	UpdatedAt    string   `json:"updated_at,omitempty"`
+}
 
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching WP posts: %w", err)
-	}
-	defer resp.Body.Close()
+// Generic incoming push payload (from WP)
+type WPIncoming struct {
+	ID      int             `json:"id"`
+	Type    string          `json:"type"` // asset2d, card, item, quiz, event
+	Title   string          `json:"title,omitempty"`
+	Status  string          `json:"status,omitempty"`  // publish, update, delete, trash
+	Content json.RawMessage `json:"content,omitempty"` // optional: already-shaped content
+}
 
-	body, _ := ioutil.ReadAll(resp.Body)
+// HTTP client / WP fetch
 
-	// Log status and raw body for debugging
-	logger.Info("WP response status: %d", resp.StatusCode)
-	logger.Info("WP raw body: %s", string(body))
+var httpClient = &http.Client{Timeout: httpTimeout}
 
-	var posts []WPPost
-	if err := json.Unmarshal(body, &posts); err != nil {
-		// Log again here in case JSON fails
-		logger.Error("Failed to unmarshal WP posts. Body was: %s", string(body))
-		return nil, fmt.Errorf("error unmarshalling WP posts: %w", err)
-	}
-
-	var buildings []Building
-	for _, post := range posts {
-		acf := post.ACF
-		if acf == nil {
-			continue
+// getArrayFromMap -> []any
+func getArrayFromMap(m map[string]any, keys ...string) []any {
+	for _, k := range keys {
+		if v, ok := m[k]; ok && v != nil {
+			switch x := v.(type) {
+			case []any:
+				fmt.Printf("found array for key %s", k)
+				return x
+			default:
+				fmt.Printf("found non-array for key %s: %T", k, x)
+				// if comma separated string
+				if s, ok := x.(string); ok {
+					parts := strings.Split(s, ",")
+					out := make([]any, 0, len(parts))
+					for _, p := range parts {
+						out = append(out, strings.TrimSpace(p))
+					}
+					return out
+				}
+			}
 		}
+	}
+	return nil
+}
 
-		lat, _ := acf["lat"].(float64)
-		lon, _ := acf["lon"].(float64)
+// parseFloatV extracts a float64 from interface values (string/float)
+func parseFloatV(v any) (float64, error) {
+	if v == nil {
+		return 0, errors.New("nil")
+	}
+	switch x := v.(type) {
+	case float64:
+		fmt.Printf("parseFloatV: got float64 %f\n", x)
+		return x, nil
+	case int:
+		fmt.Printf("parseFloatV: got int %d\n", x)
+		return float64(x), nil
+	case string:
+		fmt.Printf("parseFloatV: got string %s\n", x)
+		if x == "" {
+			return 0, errors.New("empty")
+		}
+		return strconv.ParseFloat(x, 64)
+	default:
+		fmt.Printf("parseFloatV: unsupported type %T\n", v)
+		return 0, fmt.Errorf("unsupported type %T", v)
+	}
+}
 
-		var imageURL string
-		if imgID, ok := acf["image"].(float64); ok {
-			url, err := fetchImageURL(imgID)
-			if err != nil {
-				logger.Error("Failed to fetch image for ID %v: %v", imgID, err)
-			} else {
-				imageURL = url
+// parseIntArray converts []any to []int (skips non-numeric)
+func parseIntArray(arr []any) []int {
+	out := []int{}
+	for _, v := range arr {
+		switch x := v.(type) {
+		case float64:
+			fmt.Printf("parseIntArray: got float64 %f\n", x)
+			out = append(out, int(x))
+		case int:
+			fmt.Printf("parseIntArray: got int %d\n", x)
+			out = append(out, x)
+		case string:
+			fmt.Printf("parseIntArray: got string %s\n", x)
+			if i, err := strconv.Atoi(strings.TrimSpace(x)); err == nil {
+				out = append(out, i)
+			}
+		}
+	}
+	return out
+}
+
+// Fetch from WordPress (initial population)
+
+// fetchPostsForType fetches WP posts for a given post type (rest endpoint e.g. /wp/v2/event)
+func fetchPostsForType(logger runtime.Logger, postType string) ([]map[string]any, error) {
+	url := fmt.Sprintf("%s/%s?per_page=100", wpBase, postType)
+	logger.Info("WP fetch: %s", url)
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("wp fetch error: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("wp fetch status %d: %s", resp.StatusCode, string(b))
+	}
+	var posts []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&posts); err != nil {
+		return nil, fmt.Errorf("wp decode posts error: %w", err)
+	}
+	return posts, nil
+}
+
+// Convert WP post map -> typed model
+
+func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error) {
+	// find id/title/status/meta/acf
+	idf := int(post["id"].(float64))
+	var title string
+	if v, ok := post["title"]; ok {
+		t := v.(map[string]any)
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		} else {
+			logger.Warn("title.rendered not found for post id %v", idf)
+		}
+	} else {
+		logger.Warn("missing title field for post id %v", idf)
+	}
+
+	// coordinates
+	var lat, lon float64
+	if v, ok := post["lat"]; ok {
+		if f, err := parseFloatV(v); err == nil {
+			lat = f
+		}
+	}
+	if v, ok := post["lon"]; ok {
+		if f, err := parseFloatV(v); err == nil {
+			lon = f
+		}
+	}
+
+	// image
+	var imgURL string
+	if v := post["image"]; v != nil {
+		imgURL = v.(string)
+	} else {
+		logger.Error("failed to resolve event image URL")
+	}
+
+	// requirements / rewards
+	req := parseIntArray(getArrayFromMap(post, "requirements"))
+	rew := parseIntArray(getArrayFromMap(post, "rewards"))
+
+	ev := Event{
+		ID:           idf,
+		Title:        title,
+		Lat:          lat,
+		Lon:          lon,
+		Image:        imgURL,
+		Requirements: req,
+		Rewards:      rew,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	return ev, nil
+}
+
+func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, error) {
+	logger.Info("Building Asset2D from WP post")
+	idf := int(post["id"].(float64))
+	logger.Info("Asset2D ID %d", idf)
+	var title string
+	logger.Info("Building Asset2D from WP post ID %d", idf)
+	if v, ok := post["title"]; ok {
+		t := v.(map[string]any)
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		} else {
+			logger.Warn("title.rendered not found for post id %v", idf)
+		}
+	} else {
+		logger.Warn("missing title field for post id %v", idf)
+	}
+	logger.Info("Asset title %s", title)
+
+	var imgURL string
+	if v, ok := post["image"]; ok {
+		logger.Info("Found image field for asset2d id %d", idf)
+		imgURL = v.(string)
+	} else {
+		logger.Error("failed to resolve event image url")
+	}
+	logger.Info("Image URL %s", imgURL)
+
+	return Asset2D{
+		ID:        idf,
+		Title:     title,
+		Image:     imgURL,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
+	idf := int(post["id"].(float64))
+	var title string
+	if v, ok := post["title"]; ok {
+		t := v.(map[string]any)
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		} else {
+			logger.Warn("title.rendered not found for post id %v", idf)
+		}
+	} else {
+		logger.Warn("missing title field for post id %v", idf)
+	}
+
+	var images map[string]any
+	if m, ok := post["images"].(map[string]any); ok {
+		images = m
+	}
+
+	var front, back string
+	if images != nil {
+		if v, ok := images["front_image"]; ok {
+			front = v.(string)
+		}
+		if v, ok := images["back_image"]; ok {
+			back = v.(string)
+		}
+	}
+
+	group := false
+	if v, ok := post["group_card"]; ok {
+		group = v.(bool)
+	}
+
+	return Card{
+		ID:        idf,
+		Title:     title,
+		Front:     front,
+		Back:      back,
+		GroupCard: group,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
+	logger.Info("Building Item from WP post")
+	idf := int(post["id"].(float64))
+	logger.Info("Item ID %d", idf)
+	var title string
+	if v, ok := post["title"]; ok {
+		t := v.(map[string]any)
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		} else {
+			logger.Warn("title.rendered not found for post id %v", idf)
+		}
+	} else {
+		logger.Warn("missing title field for post id %v", idf)
+	}
+
+	// Parse images
+	var img2d, img3d string
+	if m, ok := post["images"].(map[string]any); ok {
+		logger.Info("found images field for post id %v", idf)
+		// Handle 2D image
+		if v, ok := m["2d"]; ok {
+			switch img := v.(type) {
+			case string:
+				logger.Info("2D image string: %s", img)
+				img2d = img
+			case []any:
+				logger.Info("2D image array")
+				if len(img) > 0 {
+					if first, ok := img[0].(map[string]any); ok {
+						if url, ok := first["url"].(string); ok {
+							img2d = url
+						}
+					}
+				}
+			case map[string]any:
+				logger.Info("2D image map")
+				if url, ok := img["url"].(string); ok {
+					img2d = url
+				}
 			}
 		}
 
-		buildings = append(buildings, Building{
-			ID:    post.ID,
-			Lat:   lat,
-			Lon:   lon,
-			Image: imageURL,
-		})
+		// Handle 3D image
+		if v, ok := m["3d"]; ok {
+			switch img := v.(type) {
+			case string:
+				img3d = img
+			case []any:
+				if len(img) > 0 {
+					if first, ok := img[0].(map[string]any); ok {
+						if url, ok := first["url"].(string); ok {
+							img3d = url
+						}
+					}
+				}
+			case map[string]any:
+				if url, ok := img["url"].(string); ok {
+					img3d = url
+				}
+			}
+		}
+	} else {
+		logger.Warn("missing images field for post id %v", idf)
 	}
 
-	logger.Info("Fetched %d buildings from WordPress", len(buildings))
-	return buildings, nil
+	return Item{
+		ID:        idf,
+		Title:     title,
+		Image2D:   img2d,
+		Image3D:   img3d,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}, nil
 }
 
-// RPC called by WordPress to push updates
-func rpcWpPushBuilding(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	logger.Error("PAYLOAD: %s", payload)
-
-	// Parse payload
-	var data struct {
-		ID     int    `json:"id"`
-		Lat    string `json:"lat,omitempty"`
-		Lon    string `json:"lon,omitempty"`
-		Image  string `json:"image,omitempty"`
-		Title  string `json:"title,omitempty"`
-		Status string `json:"status,omitempty"`
+func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
+	idf := int(post["id"].(float64))
+	var title string
+	if v, ok := post["title"]; ok {
+		t := v.(map[string]any)
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		} else {
+			logger.Warn("title.rendered not found for post id %v", idf)
+		}
+	} else {
+		logger.Warn("missing title field for post id %v", idf)
 	}
-	if err := json.Unmarshal([]byte(payload), &data); err != nil {
-		logger.Error("Failed to parse building payload: %v", err)
+
+	var question string
+	if v, ok := post["question"]; ok {
+		question = v.(string)
+	} else {
+		logger.Error("failed to resolve quiz question")
+	}
+
+	var alts []string
+	if v, ok := post["alternatives"]; ok {
+		alts = v.([]string)
+	} else {
+		logger.Error("failed to resolve quiz alternatives")
+	}
+
+	var answer string
+	if v, ok := post["answer"]; ok {
+		answer = v.(string)
+	} else {
+		logger.Error("failed to resolve answer question")
+	}
+
+	return Quiz{
+		ID:           idf,
+		Title:        title,
+		Question:     question,
+		Alternatives: alts,
+		Answer:       answer,
+		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
+// Storage helpers
+
+func storageKeyFor(id int) string {
+	return fmt.Sprintf("%d", id)
+}
+
+func writeToStorage(ctx context.Context, nk runtime.NakamaModule, collection string, key string, v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	rec := &runtime.StorageWrite{
+		Collection: collection,
+		Key:        key,
+		UserID:     "",
+		Value:      string(b),
+	}
+	_, err = nk.StorageWrite(ctx, []*runtime.StorageWrite{rec})
+	return err
+}
+
+func deleteFromStorage(ctx context.Context, nk runtime.NakamaModule, collection string, key string) error {
+	return nk.StorageDelete(ctx, []*runtime.StorageDelete{
+		{Collection: collection, Key: key, UserID: ""},
+	})
+}
+
+// Notification helpers
+
+func notifyAll(ctx context.Context, nk runtime.NakamaModule, event string, payload any) {
+	// payload should be serializable
+	content := map[string]any{"data": payload}
+	if err := nk.NotificationSendAll(ctx, event, content, 1, false); err != nil {
+		// can't return error here; log via runtime logger is available in rpc entrypoints
+	}
+}
+
+// wp_push_content
+
+func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	// Accept either JSON object matching WPIncoming or raw map
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		logger.Error("Invalid payload JSON: %v", err)
 		return "", err
 	}
 
-	key := fmt.Sprintf("%d", data.ID)
+	pretty, _ := json.MarshalIndent(raw, "", "  ")
+	logger.Info("Received wp_push_content payload:\n%s", string(pretty))
 
-	switch data.Status {
-	case "delete", "trash":
-		// Remove from storage
-		err := nk.StorageDelete(ctx, []*runtime.StorageDelete{
-			{Collection: "buildings", Key: key, UserID: ""},
-		})
+	// Identify type and id
+	typeVal := ""
+	if t, ok := raw["type"].(string); ok {
+		typeVal = t
+	}
+	if typeVal == "" {
+		logger.Error("Payload missing 'type'")
+		return "", fmt.Errorf("missing type")
+	}
+
+	id := raw["id"].(int)
+	if id == 0 {
+		logger.Error("Payload missing or invalid 'id'")
+		return "", fmt.Errorf("missing id")
+	}
+
+	status := ""
+	if s, ok := raw["status"].(string); ok {
+		status = s
+	}
+
+	// Handle delete/trash
+	if status == "delete" || status == "trash" {
+		coll, ok := collectionByType[typeVal]
+		if !ok {
+			logger.Error("Unknown type on delete: %s", typeVal)
+			return "", fmt.Errorf("unknown type: %s", typeVal)
+		}
+		key := storageKeyFor(id)
+		if err := deleteFromStorage(ctx, nk, coll, key); err != nil {
+			logger.Error("storage delete failed: %v", err)
+			// continue to notify anyway
+		}
+		notifyAll(ctx, nk, "delete", map[string]any{"type": typeVal, "id": id})
+		logger.Info("Deleted %s %d", typeVal, id)
+		return `{"success":true}`, nil
+	}
+
+	// Handle publish/update
+	var postMap map[string]any
+	// If payload already includes content object
+	if c, ok := raw["content"].(map[string]any); ok {
+		postMap = c
+		logger.Info("Using provided post data from WP for type %s id %d", typeVal, id)
+	} else {
+		logger.Info("Couldnt fetch post data from WP for type %s id %d", typeVal, id)
+	}
+
+	// Build typed model and write to storage
+	coll, ok := collectionByType[typeVal]
+	if !ok {
+		logger.Error("unknown content type: %s", typeVal)
+		return "", fmt.Errorf("unknown type: %s", typeVal)
+	}
+
+	key := storageKeyFor(id)
+
+	switch typeVal {
+	case "event":
+		ev, err := buildEventFromWP(logger, postMap)
 		if err != nil {
-			logger.Error("Failed to delete building from storage: %v", err)
+			logger.Error("build event failed: %v", err)
 			return "", err
 		}
-
-		// Notify clients
-		content := map[string]interface{}{"data": map[string]interface{}{"id": data.ID}}
-		if err := nk.NotificationSendAll(ctx, "building_delete", content, 1, false); err != nil {
-			logger.Error("Failed to send delete notification: %v", err)
-		}
-
-	case "update", "publish":
-		// Convert Lat/Lon to float
-		var latF, lonF float64
-		if data.Lat != "" {
-			if v, err := strconv.ParseFloat(data.Lat, 64); err == nil {
-				latF = v
-			} else {
-				logger.Error("Invalid lat value: %v", data.Lat)
-			}
-		}
-		if data.Lon != "" {
-			if v, err := strconv.ParseFloat(data.Lon, 64); err == nil {
-				lonF = v
-			} else {
-				logger.Error("Invalid lon value: %v", data.Lon)
-			}
-		}
-
-		// Save/update in storage
-		b := map[string]interface{}{
-			"id":     data.ID,
-			"lat":    latF,
-			"lon":    lonF,
-			"image":  data.Image,
-			"title":  data.Title,
-			"status": data.Status,
-		}
-		val, _ := json.Marshal(b)
-		record := &runtime.StorageWrite{
-			Collection: "buildings",
-			Key:        key,
-			UserID:     "",
-			Value:      string(val),
-		}
-		if _, err := nk.StorageWrite(ctx, []*runtime.StorageWrite{record}); err != nil {
-			logger.Error("Failed to write building to storage: %v", err)
+		if err := writeToStorage(ctx, nk, coll, key, ev); err != nil {
+			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
-
-		// Notify clients
-		content := map[string]interface{}{"data": b}
-		if err := nk.NotificationSendAll(ctx, "building_update", content, 1, false); err != nil {
-			logger.Error("Failed to send update notification: %v", err)
+		notifyAll(ctx, nk, "update", ev)
+		logger.Info("Stored event %d", ev.ID)
+	case "asset2d":
+		as, err := buildAsset2DFromWP(logger, postMap)
+		if err != nil {
+			logger.Error("build asset2d failed: %v", err)
+			return "", err
 		}
-
+		if err := writeToStorage(ctx, nk, coll, key, as); err != nil {
+			logger.Error("storage write failed: %v", err)
+			return "", err
+		}
+		notifyAll(ctx, nk, "update", as)
+		logger.Info("Stored asset2d %d", as.ID)
+	case "card":
+		ca, err := buildCardFromWP(logger, postMap)
+		if err != nil {
+			logger.Error("build card failed: %v", err)
+			return "", err
+		}
+		if err := writeToStorage(ctx, nk, coll, key, ca); err != nil {
+			logger.Error("storage write failed: %v", err)
+			return "", err
+		}
+		notifyAll(ctx, nk, "update", ca)
+		logger.Info("Stored card %d", ca.ID)
+	case "item":
+		it, err := buildItemFromWP(logger, postMap)
+		if err != nil {
+			logger.Error("build item failed: %v", err)
+			return "", err
+		}
+		if err := writeToStorage(ctx, nk, coll, key, it); err != nil {
+			logger.Error("storage write failed: %v", err)
+			return "", err
+		}
+		notifyAll(ctx, nk, "update", it)
+		logger.Info("Stored item %d", it.ID)
+	case "quiz":
+		qz, err := buildQuizFromWP(logger, postMap)
+		if err != nil {
+			logger.Error("build quiz failed: %v", err)
+			return "", err
+		}
+		if err := writeToStorage(ctx, nk, coll, key, qz); err != nil {
+			logger.Error("storage write failed: %v", err)
+			return "", err
+		}
+		notifyAll(ctx, nk, "update", qz)
+		logger.Info("Stored quiz %d", qz.ID)
 	default:
-		logger.Error("Unknown status in payload: %v", data.Status)
-		return "", fmt.Errorf("unknown status: %s", data.Status)
+		logger.Error("unsupported type: %s", typeVal)
+		return "", fmt.Errorf("unsupported type: %s", typeVal)
 	}
 
 	return `{"success":true}`, nil
 }
 
-// RPC for clients to fetch all buildings from Nakama Storage
-func rpcGetBuildings(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	objects, _, err := nk.StorageList(ctx, "", "", "buildings", 1000, "")
-	if err != nil {
-		return "", err
+// Client RPC to get content
+// payload JSON optionally: {"type":"event"} or empty for all
+func rpcGetContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	// parse optional filter
+	var filter map[string]any
+	if payload != "" {
+		_ = json.Unmarshal([]byte(payload), &filter)
 	}
-
-	var buildings []Building
-	for _, obj := range objects {
-		var b Building
-		if err := json.Unmarshal([]byte(obj.Value), &b); err == nil {
-			buildings = append(buildings, b)
+	var requestedType string
+	if filter != nil {
+		if t, ok := filter["type"].(string); ok {
+			requestedType = t
 		}
 	}
 
-	data, _ := json.Marshal(buildings)
-	return string(data), nil
-}
+	results := []map[string]any{}
 
-// Wait for WordPress to respond before initial fetch
-func waitForWP(logger runtime.Logger, url string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
-		if err == nil && resp.StatusCode == 200 {
-			resp.Body.Close()
-			logger.Info("WordPress is up!")
-			return nil
+	// iterate collections
+	for t, coll := range collectionByType {
+		if requestedType != "" && requestedType != t {
+			continue
 		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		logger.Info("Waiting for WordPress...")
-		time.Sleep(2 * time.Second)
-	}
-	return fmt.Errorf("WordPress did not respond in %v", timeout)
-}
-
-// Module initializer
-func InitBuildings(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
-	// Register RPCs
-	if err := initializer.RegisterRpc("wp_push_building", rpcWpPushBuilding); err != nil {
-		return err
-	}
-	if err := initializer.RegisterRpc("get_buildings", rpcGetBuildings); err != nil {
-		return err
-	}
-
-	// Wait for WordPress
-	wpURL := "http://wordpress:80/wp-json/wp/v2/posts/"
-	if err := waitForWP(logger, wpURL, time.Minute); err != nil {
-		return nil
-	}
-
-	// Populate storage if empty
-	objects, _, err := nk.StorageList(ctx, "", "", "buildings", 1, "")
-	if err != nil {
-		return err
-	}
-	if len(objects) == 0 {
-		logger.Info("No buildings in storage, fetching initial data from WordPress...")
-		buildings, err := fetchBuildingsFromWP(logger)
+		objects, _, err := nk.StorageList(ctx, "", "", coll, 1000, "")
 		if err != nil {
-			logger.Info("Error fetching buildings from WP: %v", err)
-			return nil
+			logger.Error("storage list failed for %s: %v", coll, err)
+			continue
 		}
-		if len(buildings) == 0 {
-			logger.Info("No buildings found in WordPress; skipping initial storage write")
-			return nil
+		for _, obj := range objects {
+			// obj.Value is JSON string
+			var m map[string]any
+			if err := json.Unmarshal([]byte(obj.Value), &m); err != nil {
+				// if cannot parse, skip
+				logger.Error("storage unmarshal failed: %v", err)
+				continue
+			}
+			results = append(results, m)
 		}
-		var writes []*runtime.StorageWrite
-		for _, b := range buildings {
-			val, _ := json.Marshal(b)
-			writes = append(writes, &runtime.StorageWrite{
-				Collection: "buildings",
-				Key:        fmt.Sprintf("%d", b.ID),
-				UserID:     "",
-				Value:      string(val),
-			})
+	}
+
+	resB, _ := json.Marshal(results)
+	return string(resB), nil
+}
+
+// Init module
+
+func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
+	// Register central RPC used by WP notifier
+	if err := initializer.RegisterRpc("wp_push_content", rpcWpPushContent); err != nil {
+		return err
+	}
+	// Register client-facing fetch RPC
+	if err := initializer.RegisterRpc("get_content", rpcGetContent); err != nil {
+		return err
+	}
+
+	// Optionally, pre-populate storage on startup by fetching WP posts if storage empty.
+	// We'll attempt to fetch each type if its collection is empty.
+	for t, coll := range collectionByType {
+		objects, _, err := nk.StorageList(ctx, "", "", coll, 1, "")
+		if err != nil {
+			logger.Error("storage list error on init: %v", err)
+			continue
+		}
+		if len(objects) > 0 {
+			logger.Info("collection %s already has data, skipping initial fetch", coll)
+			continue
+		}
+		// fetch posts for this type
+		posts, err := fetchPostsForType(logger, t)
+		if err != nil {
+			logger.Error("failed to fetch posts for %s: %v", t, err)
+			continue
+		}
+		if len(posts) == 0 {
+			logger.Info("no posts for %s", t)
+			continue
+		}
+		writes := []*runtime.StorageWrite{}
+		for _, p := range posts {
+			logger.Info("Full post payload: %+v", p)
+			idf := int(p["id"].(float64))
+			var key = storageKeyFor(idf)
+			switch t {
+			case "event":
+				ev, err := buildEventFromWP(logger, p)
+				if err != nil {
+					logger.Error("build event failed: %v", err)
+					continue
+				}
+				b, _ := json.Marshal(ev)
+				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
+			case "asset2d":
+				logger.Info("Building asset2d for initial fetch")
+				as, err := buildAsset2DFromWP(logger, p)
+				if err != nil {
+					logger.Error("build asset2d failed: %v", err)
+					continue
+				}
+				b, _ := json.Marshal(as)
+				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
+			case "card":
+				ca, err := buildCardFromWP(logger, p)
+				if err != nil {
+					continue
+				}
+				b, _ := json.Marshal(ca)
+				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
+			case "item":
+				logger.Info("Building item for initial fetch")
+				it, err := buildItemFromWP(logger, p)
+				if err != nil {
+					logger.Error("build item failed: %v", err)
+					continue
+				}
+				b, _ := json.Marshal(it)
+				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
+			case "quiz":
+				qz, err := buildQuizFromWP(logger, p)
+				if err != nil {
+					continue
+				}
+				b, _ := json.Marshal(qz)
+				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
+			}
 		}
 		if len(writes) > 0 {
 			if _, err := nk.StorageWrite(ctx, writes); err != nil {
-				return err
+				logger.Error("initial storage write failed for %s: %v", coll, err)
+			} else {
+				logger.Info("initial data written for %s (%d items)", coll, len(writes))
 			}
-			logger.Info("Initial buildings saved to storage")
 		}
 	}
 
-	logger.Info("Buildings module initialized")
+	logger.Info("ContentSync module initialized")
 	return nil
 }
