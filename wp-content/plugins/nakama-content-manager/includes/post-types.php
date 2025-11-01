@@ -11,6 +11,7 @@ function nakama_register_post_types() {
         'show_ui' => true,
         'show_in_rest' => true,
         'supports' => ['title'],
+        'menu_icon' => 'dashicons-format-image',
     ]);
 
     register_post_meta('event', 'lat', [
@@ -38,6 +39,7 @@ function nakama_register_post_types() {
         'show_ui' => true,
         'show_in_rest' => true,
         'supports' => ['title'],
+        'menu_icon' => 'dashicons-format-image',
     ]);
     register_post_meta('asset2d', 'image', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
 
@@ -48,6 +50,7 @@ function nakama_register_post_types() {
         'show_ui' => true,
         'show_in_rest' => true,
         'supports' => ['title'],
+        'menu_icon' => 'dashicons-format-image',
     ]);
     register_post_meta('card', 'front_image', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
     register_post_meta('card', 'back_image', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
@@ -60,9 +63,26 @@ function nakama_register_post_types() {
         'show_ui' => true,
         'show_in_rest' => true,
         'supports' => ['title'],
+        'menu_icon' => 'dashicons-format-image',
     ]);
-    register_post_meta('item', 'image_2d', ['type' => 'integer', 'single' => true, 'show_in_rest' => true]);
-    register_post_meta('item', 'image_3d', ['type' => 'string', 'single' => true, 'show_in_rest' => true]);
+    register_post_meta('item', 'image_2d', ['type' => 'integer', 'single' => true,
+        'show_in_rest' => [
+            'schema' => ['type' => 'string'],
+            'get_callback' => function ($object) {
+            $id = get_post_meta($object['id'], 'image_2d', true);
+            return $id ? wp_get_attachment_url($id) : null;
+            },
+        ],
+    ]);
+    register_post_meta('item', 'image_3d', ['type' => 'integer', 'single' => true,
+        'show_in_rest' => [
+            'schema' => ['type' => 'string'],
+            'get_callback' => function ($object) {
+            $id = get_post_meta($object['id'], 'image_3d', true);
+            return $id ? wp_get_attachment_url($id) : null;
+            },
+        ],
+    ]);
 
     // Quiz
     register_post_type('quiz', [
@@ -71,6 +91,7 @@ function nakama_register_post_types() {
         'show_ui' => true,
         'show_in_rest' => true,
         'supports' => ['title'],
+        'menu_icon' => 'dashicons-format-image',
     ]);
     register_post_meta('quiz', 'question', ['type' => 'string', 'single' => true, 'show_in_rest' => true]);
     register_post_meta('quiz', 'alternatives', [
@@ -147,7 +168,7 @@ function nakama_render_meta_box($post) {
 
     if ($type === 'item') {
         nak_media('image_2d', $post, '2D Image');
-        nak_input('image_3d', $post, '3D Asset');
+        nak_media('image_3d', $post, '3D Asset');
     }
 
     if ($type === 'quiz') {
@@ -191,7 +212,8 @@ function nakama_render_meta_box($post) {
 function nak_input($key, $post, $label = null) {
     $label = $label ?: ucfirst($key);
     $val = esc_attr(get_post_meta($post->ID, $key, true));
-    echo "<div class='nak-row'><label class='nak-label'>{$label}</label><input type='text' name='{$key}' value='{$val}' class='widefat' /></div>";
+    echo "<div class='nak-row'><label class='nak-label'>{$label}</label><?php $id = esc_attr($post->post_type . '_' . $key); ?>
+          <input id='<?= $id ?>' type='text' name='<?= $key ?>' value='<?= $val ?>' class='widefat' /></div>";
 }
 
 function nak_checkbox($key, $post) {
@@ -235,9 +257,11 @@ function nak_media($key, $post, $type = 'image') {
 
     ?>
     <div class="nak-row">
-        <label class="nak-label"><?= ucfirst($key) ?></label>
+        <?php $label = ucwords(str_replace(['_', '-'], ' ', $key)); ?>
+        <label class="nak-label"><?= esc_html($label) ?></label>
 
-        <input type="hidden" name="<?= $key ?>" value="<?= esc_attr($id_or_url) ?>" />
+        <?php $id = esc_attr($post->post_type . '_' . $key); ?>
+        <input id="<?= $id ?>" type="hidden" name="<?= $key ?>" value="<?= esc_attr($id_or_url) ?>" />
 
         <button type="button" class="button nak-media-btn"
                 data-target="<?= $key ?>"
@@ -314,4 +338,48 @@ add_action('save_post', function($post_id) {
             delete_post_meta($post_id,$arr);
         }
     }
+});
+
+add_filter('upload_mimes', function ($mimes) {
+    $mimes['glb']  = 'model/gltf-binary';
+    $mimes['gltf'] = 'model/gltf+json';
+    return $mimes;
+});
+
+// Register how media appears in REST (URLs)
+add_action('rest_api_init', function () {
+    // Helper to register one or more image fields for a post type
+    function register_image_fields($post_type, $fields) {
+        foreach ($fields as $meta_key => $label) {
+            register_rest_field($post_type, $label, [
+                'get_callback' => function ($object) use ($meta_key) {
+                    $id = get_post_meta($object['id'], $meta_key, true);
+                    return $id ? wp_get_attachment_url($id) : null;
+                },
+                'schema' => [
+                    'description' => ucfirst($label) . ' image or model URL',
+                    'type'        => 'string',
+                    'context'     => ['view', 'edit'],
+                ],
+            ]);
+        }
+    }
+    // Item post type → 2D + 3D
+    register_image_fields('item', [
+        'image_2d' => '2d',
+        'image_3d' => '3d',
+    ]);
+    // Card post type → front + back
+    register_image_fields('card', [
+        'front_image' => 'front',
+        'back_image'  => 'back',
+    ]);
+    // Asset2D post type → single image
+    register_image_fields('asset2d', [
+        'image' => 'image',
+    ]);
+    // Event post type → single image
+    register_image_fields('event', [
+        'image' => 'image',
+    ]);
 });

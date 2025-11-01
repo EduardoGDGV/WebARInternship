@@ -35,7 +35,7 @@ function nakama_notify_save($post_id, $post, $update) {
 
             // unified relations (always arrays)
             $payload['requirements'] = get_post_meta($post_id, 'requirements', true) ?: [];
-            $payload['rewards'] = get_post_meta($post_id, 'rewards', true) ?: [];
+            $payload['rewards']      = get_post_meta($post_id, 'rewards', true) ?: [];
             break;
 
         case 'asset2d':
@@ -43,26 +43,20 @@ function nakama_notify_save($post_id, $post, $update) {
             break;
 
         case 'card':
-            $payload['images'] = [
-                "front" => nakama_get_image_url(get_post_meta($post_id, 'front_image', true)),
-                "back"  => nakama_get_image_url(get_post_meta($post_id, 'back_image', true)),
-            ];
+            $payload['front']      = nakama_get_image_url(get_post_meta($post_id, 'front_image', true));
+            $payload['back']       = nakama_get_image_url(get_post_meta($post_id, 'back_image', true));
             $payload['group_card'] = (bool)get_post_meta($post_id, 'group_card', true);
             break;
 
         case 'item':
-            $payload['images'] = [
-                "2d" => nakama_get_image_url(get_post_meta($post_id, 'image_2d', true)),
-                "3d" => nakama_get_image_url(get_post_meta($post_id, 'image_3d', true)),
-            ];
+            $payload['2d'] = nakama_get_image_url(get_post_meta($post_id, 'image_2d', true));
+            $payload['3d'] = nakama_get_image_url(get_post_meta($post_id, 'image_3d', true));
             break;
 
         case 'quiz':
-            $payload['content'] = [
-                "question"     => get_post_meta($post_id, 'question', true),
-                "alternatives" => get_post_meta($post_id, 'alternatives', true),
-                "answer"       => get_post_meta($post_id, 'answer', true),
-            ];
+            $payload['question']     = get_post_meta($post_id, 'question', true);
+            $payload['alternatives'] = get_post_meta($post_id, 'alternatives', true);
+            $payload['answer']       = get_post_meta($post_id, 'answer', true);
             break;
     }
 
