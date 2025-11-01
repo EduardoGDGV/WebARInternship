@@ -187,30 +187,31 @@ func fetchPostsForType(logger runtime.Logger, postType string) ([]map[string]any
 // Convert WP post map -> typed model
 
 func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error) {
-	// find id/title/status/meta/acf
 	idf := int(post["id"].(float64))
 	var title string
-	if v, ok := post["title"]; ok {
-		t := v.(map[string]any)
-		if rendered, ok := t["rendered"].(string); ok {
-			title = rendered
-		} else {
-			logger.Warn("title.rendered not found for post id %v", idf)
-		}
-	} else {
-		logger.Warn("missing title field for post id %v", idf)
+
+	switch t := post["title"].(type) {
+		case string:
+			title = t
+		case map[string]any:
+			if rendered, ok := t["rendered"].(string); ok {
+				title = rendered
+			}
 	}
 
-	// coordinates
 	var lat, lon float64
-	if v, ok := post["lat"]; ok {
-		if f, err := parseFloatV(v); err == nil {
-			lat = f
+	var coordinates = map[string]any{}
+	if v, ok := post["coordinates"]; ok {
+		coordinates = v.(map[string]any)
+		if v, ok := coordinates["lat"]; ok {
+			if f, err := parseFloatV(v); err == nil {
+				lat = f
+			}
 		}
-	}
-	if v, ok := post["lon"]; ok {
-		if f, err := parseFloatV(v); err == nil {
-			lon = f
+		if v, ok := coordinates["lon"]; ok {
+			if f, err := parseFloatV(v); err == nil {
+				lon = f
+			}
 		}
 	}
 
@@ -244,16 +245,14 @@ func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, er
 	idf := int(post["id"].(float64))
 	logger.Info("Asset2D ID %d", idf)
 	var title string
-	logger.Info("Building Asset2D from WP post ID %d", idf)
-	if v, ok := post["title"]; ok {
-		t := v.(map[string]any)
-		if rendered, ok := t["rendered"].(string); ok {
-			title = rendered
-		} else {
-			logger.Warn("title.rendered not found for post id %v", idf)
-		}
-	} else {
-		logger.Warn("missing title field for post id %v", idf)
+
+	switch t := post["title"].(type) {
+		case string:
+			title = t
+		case map[string]any:
+			if rendered, ok := t["rendered"].(string); ok {
+				title = rendered
+			}
 	}
 	logger.Info("Asset title %s", title)
 
@@ -277,22 +276,21 @@ func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, er
 func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
 	idf := int(post["id"].(float64))
 	var title string
-	if v, ok := post["title"]; ok {
-		t := v.(map[string]any)
-		if rendered, ok := t["rendered"].(string); ok {
-			title = rendered
-		} else {
-			logger.Warn("title.rendered not found for post id %v", idf)
-		}
-	} else {
-		logger.Warn("missing title field for post id %v", idf)
+
+	switch t := post["title"].(type) {
+		case string:
+			title = t
+		case map[string]any:
+			if rendered, ok := t["rendered"].(string); ok {
+				title = rendered
+			}
 	}
 
 	var front, back string
-	if v, ok := post["front_image"]; ok {
+	if v, ok := post["front"]; ok {
 		front = v.(string)
 	}
-	if v, ok := post["back_image"]; ok {
+	if v, ok := post["back"]; ok {
 		back = v.(string)
 	}
 
@@ -316,15 +314,14 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 	idf := int(post["id"].(float64))
 	logger.Info("Item ID %d", idf)
 	var title string
-	if v, ok := post["title"]; ok {
-		t := v.(map[string]any)
-		if rendered, ok := t["rendered"].(string); ok {
-			title = rendered
-		} else {
-			logger.Warn("title.rendered not found for post id %v", idf)
-		}
-	} else {
-		logger.Warn("missing title field for post id %v", idf)
+
+	switch t := post["title"].(type) {
+		case string:
+			title = t
+		case map[string]any:
+			if rendered, ok := t["rendered"].(string); ok {
+				title = rendered
+			}
 	}
 
 	// Parse images
@@ -348,15 +345,14 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
 	idf := int(post["id"].(float64))
 	var title string
-	if v, ok := post["title"]; ok {
-		t := v.(map[string]any)
-		if rendered, ok := t["rendered"].(string); ok {
-			title = rendered
-		} else {
-			logger.Warn("title.rendered not found for post id %v", idf)
-		}
-	} else {
-		logger.Warn("missing title field for post id %v", idf)
+
+	switch t := post["title"].(type) {
+		case string:
+			title = t
+		case map[string]any:
+			if rendered, ok := t["rendered"].(string); ok {
+				title = rendered
+			}
 	}
 
 	var question string
@@ -368,9 +364,15 @@ func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
 
 	var alts []string
 	if v, ok := post["alternatives"]; ok {
-		alts = v.([]string)
+		if arr, ok := v.([]any); ok {
+			for _, val := range arr {
+				if s, ok := val.(string); ok {
+					alts = append(alts, s)
+				}
+			}
+		}
 	} else {
-		logger.Error("failed to resolve quiz alternatives")
+		logger.Warn("missing alternatives for quiz id %v", idf)
 	}
 
 	var answer string
