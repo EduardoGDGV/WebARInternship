@@ -288,19 +288,12 @@ func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
 		logger.Warn("missing title field for post id %v", idf)
 	}
 
-	var images map[string]any
-	if m, ok := post["images"].(map[string]any); ok {
-		images = m
-	}
-
 	var front, back string
-	if images != nil {
-		if v, ok := images["front_image"]; ok {
-			front = v.(string)
-		}
-		if v, ok := images["back_image"]; ok {
-			back = v.(string)
-		}
+	if v, ok := post["front_image"]; ok {
+		front = v.(string)
+	}
+	if v, ok := post["back_image"]; ok {
+		back = v.(string)
 	}
 
 	group := false
@@ -336,52 +329,11 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 
 	// Parse images
 	var img2d, img3d string
-	if m, ok := post["images"].(map[string]any); ok {
-		logger.Info("found images field for post id %v", idf)
-		// Handle 2D image
-		if v, ok := m["2d"]; ok {
-			switch img := v.(type) {
-			case string:
-				logger.Info("2D image string: %s", img)
-				img2d = img
-			case []any:
-				logger.Info("2D image array")
-				if len(img) > 0 {
-					if first, ok := img[0].(map[string]any); ok {
-						if url, ok := first["url"].(string); ok {
-							img2d = url
-						}
-					}
-				}
-			case map[string]any:
-				logger.Info("2D image map")
-				if url, ok := img["url"].(string); ok {
-					img2d = url
-				}
-			}
-		}
-
-		// Handle 3D image
-		if v, ok := m["3d"]; ok {
-			switch img := v.(type) {
-			case string:
-				img3d = img
-			case []any:
-				if len(img) > 0 {
-					if first, ok := img[0].(map[string]any); ok {
-						if url, ok := first["url"].(string); ok {
-							img3d = url
-						}
-					}
-				}
-			case map[string]any:
-				if url, ok := img["url"].(string); ok {
-					img3d = url
-				}
-			}
-		}
-	} else {
-		logger.Warn("missing images field for post id %v", idf)
+	if v, ok := post["2d"]; ok {
+		img2d = v.(string)
+	}
+	if v, ok := post["3d"]; ok {
+		img3d = v.(string)
 	}
 
 	return Item{
@@ -465,8 +417,7 @@ func deleteFromStorage(ctx context.Context, nk runtime.NakamaModule, collection 
 	})
 }
 
-// Notification helpers
-
+// Notification helper
 func notifyAll(ctx context.Context, nk runtime.NakamaModule, event string, payload any) {
 	// payload should be serializable
 	content := map[string]any{"data": payload}
@@ -476,7 +427,6 @@ func notifyAll(ctx context.Context, nk runtime.NakamaModule, event string, paylo
 }
 
 // wp_push_content
-
 func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
 	// Accept either JSON object matching WPIncoming or raw map
 	var raw map[string]any
@@ -498,7 +448,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		return "", fmt.Errorf("missing type")
 	}
 
-	id := raw["id"].(int)
+	id := int(raw["id"].(float64))
 	if id == 0 {
 		logger.Error("Payload missing or invalid 'id'")
 		return "", fmt.Errorf("missing id")
@@ -527,15 +477,6 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 	}
 
 	// Handle publish/update
-	var postMap map[string]any
-	// If payload already includes content object
-	if c, ok := raw["content"].(map[string]any); ok {
-		postMap = c
-		logger.Info("Using provided post data from WP for type %s id %d", typeVal, id)
-	} else {
-		logger.Info("Couldnt fetch post data from WP for type %s id %d", typeVal, id)
-	}
-
 	// Build typed model and write to storage
 	coll, ok := collectionByType[typeVal]
 	if !ok {
@@ -547,7 +488,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 
 	switch typeVal {
 	case "event":
-		ev, err := buildEventFromWP(logger, postMap)
+		ev, err := buildEventFromWP(logger, raw)
 		if err != nil {
 			logger.Error("build event failed: %v", err)
 			return "", err
@@ -559,7 +500,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		notifyAll(ctx, nk, "update", ev)
 		logger.Info("Stored event %d", ev.ID)
 	case "asset2d":
-		as, err := buildAsset2DFromWP(logger, postMap)
+		as, err := buildAsset2DFromWP(logger, raw)
 		if err != nil {
 			logger.Error("build asset2d failed: %v", err)
 			return "", err
@@ -571,7 +512,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		notifyAll(ctx, nk, "update", as)
 		logger.Info("Stored asset2d %d", as.ID)
 	case "card":
-		ca, err := buildCardFromWP(logger, postMap)
+		ca, err := buildCardFromWP(logger, raw)
 		if err != nil {
 			logger.Error("build card failed: %v", err)
 			return "", err
@@ -583,7 +524,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		notifyAll(ctx, nk, "update", ca)
 		logger.Info("Stored card %d", ca.ID)
 	case "item":
-		it, err := buildItemFromWP(logger, postMap)
+		it, err := buildItemFromWP(logger, raw)
 		if err != nil {
 			logger.Error("build item failed: %v", err)
 			return "", err
@@ -595,7 +536,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		notifyAll(ctx, nk, "update", it)
 		logger.Info("Stored item %d", it.ID)
 	case "quiz":
-		qz, err := buildQuizFromWP(logger, postMap)
+		qz, err := buildQuizFromWP(logger, raw)
 		if err != nil {
 			logger.Error("build quiz failed: %v", err)
 			return "", err
@@ -658,7 +599,6 @@ func rpcGetContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 }
 
 // Init module
-
 func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
 	// Register central RPC used by WP notifier
 	if err := initializer.RegisterRpc("wp_push_content", rpcWpPushContent); err != nil {
@@ -698,6 +638,7 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 			var key = storageKeyFor(idf)
 			switch t {
 			case "event":
+				logger.Info("Building event for initial fetch")
 				ev, err := buildEventFromWP(logger, p)
 				if err != nil {
 					logger.Error("build event failed: %v", err)
@@ -715,8 +656,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 				b, _ := json.Marshal(as)
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			case "card":
+				logger.Info("Building card for initial fetch")
 				ca, err := buildCardFromWP(logger, p)
 				if err != nil {
+					logger.Error("build card failed: %v", err)
 					continue
 				}
 				b, _ := json.Marshal(ca)
@@ -731,8 +674,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 				b, _ := json.Marshal(it)
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			case "quiz":
+				logger.Info("Building quiz for initial fetch")
 				qz, err := buildQuizFromWP(logger, p)
 				if err != nil {
+					logger.Error("build quiz failed: %v", err)
 					continue
 				}
 				b, _ := json.Marshal(qz)
@@ -743,7 +688,7 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 			if _, err := nk.StorageWrite(ctx, writes); err != nil {
 				logger.Error("initial storage write failed for %s: %v", coll, err)
 			} else {
-				logger.Info("initial data written for %s (%d items)", coll, len(writes))
+				logger.Info("Initial data written for %s (%d items)", coll, len(writes))
 			}
 		}
 	}
