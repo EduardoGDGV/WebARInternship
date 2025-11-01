@@ -212,8 +212,12 @@ function nakama_render_meta_box($post) {
 function nak_input($key, $post, $label = null) {
     $label = $label ?: ucfirst($key);
     $val = esc_attr(get_post_meta($post->ID, $key, true));
-    echo "<div class='nak-row'><label class='nak-label'>{$label}</label><?php $id = esc_attr($post->post_type . '_' . $key); ?>
-          <input id='<?= $id ?>' type='text' name='<?= $key ?>' value='<?= $val ?>' class='widefat' /></div>";
+    $id  = esc_attr($post->post_type . '_' . $key);
+
+    echo "<div class='nak-row'>
+            <label class='nak-label' for='{$id}'>{$label}</label>
+            <input id='{$id}' type='text' name='{$key}' value='{$val}' class='widefat' />
+          </div>";
 }
 
 function nak_checkbox($key, $post) {
@@ -224,12 +228,6 @@ function nak_checkbox($key, $post) {
 function nak_textarea($key, $post) {
     $val = esc_textarea(get_post_meta($post->ID, $key, true));
     echo "<div class='nak-row'><label class='nak-label'>{$key}</label><textarea name='{$key}' rows='3' class='widefat'>{$val}</textarea></div>";
-}
-
-function nak_textarea_csv($key, $post, $label) {
-    $vals = get_post_meta($post->ID, $key, true) ?: [];
-    $val = esc_textarea(implode("\n", (array)$vals));
-    echo "<div class='nak-row'><label class='nak-label'>{$label}</label><textarea name='{$key}' rows='4' class='widefat'>{$val}</textarea></div>";
 }
 
 function nak_multi_select($key, $post, $posts) {
@@ -348,6 +346,44 @@ add_filter('upload_mimes', function ($mimes) {
 
 // Register how media appears in REST (URLs)
 add_action('rest_api_init', function () {
+    // Exposing quiz fields
+    register_rest_field('quiz', 'question', [
+        'get_callback' => function ($object) {
+            return get_post_meta($object['id'], 'question', true) ?: null;
+        },
+        'schema' => [
+            'description' => 'Quiz question',
+            'type'        => 'string',
+            'context'     => ['view', 'edit'],
+        ],
+    ]);
+
+    register_rest_field('quiz', 'alternatives', [
+        'get_callback' => function ($object) {
+            // stored as array in meta — return as array (or empty array)
+            $alts = get_post_meta($object['id'], 'alternatives', true);
+            if (empty($alts)) return [];
+            return (array) $alts;
+        },
+        'schema' => [
+            'description' => 'Quiz alternatives (A..D)',
+            'type'        => 'array',
+            'items'       => ['type' => 'string'],
+            'context'     => ['view', 'edit'],
+        ],
+    ]);
+
+    register_rest_field('quiz', 'answer', [
+        'get_callback' => function ($object) {
+            return get_post_meta($object['id'], 'answer', true) ?: null;
+        },
+        'schema' => [
+            'description' => 'Correct answer label (A|B|C|D)',
+            'type'        => 'string',
+            'context'     => ['view', 'edit'],
+        ],
+    ]);
+
     // Helper to register one or more image fields for a post type
     function register_image_fields($post_type, $fields) {
         foreach ($fields as $meta_key => $label) {
