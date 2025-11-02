@@ -30,7 +30,7 @@ function nakama_notify_save($post_id, $post, $update) {
                 "lat" => is_numeric($lat_meta) ? floatval($lat_meta) : 0.0,
                 "lon" => is_numeric($lon_meta) ? floatval($lon_meta) : 0.0,
             ];
-            // marker image (attachment -> url)
+            // marker image (attachment url)
             $payload['image'] = nakama_get_image_url(get_post_meta($post_id, 'image', true));
 
             // unified relations (always arrays)

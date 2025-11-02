@@ -24,7 +24,11 @@ jQuery(function($){
         const metaKey = $container.data('meta-key');
         const allowedTypes = $container.data('types').split(',');
         let options = [];
-        let selectedIds = ($container.data('meta-value') || '').split(',').filter(Boolean).map(Number);
+        let selectedIds = String($container.data('meta-value') || '')
+            .split(',')
+            .map(v => parseInt(v, 10))
+            .filter(v => !isNaN(v) && v > 0);
+
 
         const $list = $('<div class="nak-picker-list" style="border:1px solid #ddd; padding:6px; min-height:120px;"></div>');
         const $hidden = $('<input type="hidden" name="'+metaKey+'" />').val(selectedIds.join(','));

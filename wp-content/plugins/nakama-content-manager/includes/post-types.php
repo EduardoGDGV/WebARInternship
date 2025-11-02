@@ -146,18 +146,27 @@ function nakama_render_meta_box($post) {
         nak_input('lon', $post);
         nak_media('image', $post);
 
-        $req_ids = get_post_meta($post->ID,'requirements',true) ?: [];
-        $rew_ids = get_post_meta($post->ID,'rewards',true) ?: [];
+        $reqs = (array) get_post_meta($post->ID, 'requirements', true);
+        $rewards = (array) get_post_meta($post->ID, 'rewards', true);
+        ?>
+            <div class="nak-row">
+                <label class="nak-label">Requirements</label>
+                <div class="nakama-multi-select"
+                    data-meta-key="requirements"
+                    data-types="quiz,event,item"
+                    data-meta-value="<?php echo esc_attr(implode(',', array_map('intval', $reqs))); ?>">
+                </div>
+            </div>
 
-        echo '<div class="nak-row">';
-        echo '<label class="nak-label">Requirements</label>';
-        echo '<div class="nakama-multi-select" data-meta-key="requirements" data-types="item,quiz" data-meta-value="No assets to select..."'.esc_attr(implode(',',$req_ids)).'"></div>';
-        echo '</div>';
-
-        echo '<div class="nak-row">';
-        echo '<label class="nak-label">Rewards</label>';
-        echo '<div class="nakama-multi-select" data-meta-key="rewards" data-types="item,card" data-meta-value="No assets to select..."'.esc_attr(implode(',',$rew_ids)).'"></div>';
-        echo '</div>';
+            <div class="nak-row">
+                <label class="nak-label">Rewards</label>
+                <div class="nakama-multi-select"
+                    data-meta-key="rewards"
+                    data-types="item"
+                    data-meta-value="<?php echo esc_attr(implode(',', array_map('intval', $rewards))); ?>">
+                </div>
+            </div>
+        <?php
     }
 
     if ($type === 'card') {
@@ -329,11 +338,13 @@ add_action('save_post', function($post_id) {
     update_post_meta($post_id,'group_card', isset($_POST['group_card']));
 
     // Multi selects
-    foreach (['requirements','rewards'] as $arr) {
+    foreach (['requirements', 'rewards'] as $arr) {
         if (isset($_POST[$arr])) {
-            update_post_meta($post_id,$arr,array_map('intval',$_POST[$arr]));
+            // Convert comma-separated string into array of ints
+            $vals = is_array($_POST[$arr]) ? $_POST[$arr] : explode(',', $_POST[$arr]);
+            update_post_meta($post_id, $arr, array_map('intval', $vals));
         } else {
-            delete_post_meta($post_id,$arr);
+            delete_post_meta($post_id, $arr);
         }
     }
 });
@@ -346,6 +357,41 @@ add_filter('upload_mimes', function ($mimes) {
 
 // Register how media appears in REST (URLs)
 add_action('rest_api_init', function () {
+    //Exposing event fields
+    register_rest_field('event', 'requirements', [
+        'get_callback' => function ($object) {
+            $ids = get_post_meta($object['id'], 'requirements', true);
+            return is_array($ids) ? $ids : array_filter(array_map('intval', explode(',', (string)$ids)));
+        },
+        'schema' => [
+            'description' => 'Requirement IDs',
+            'type'        => 'array',
+            'items'       => ['type' => 'integer'],
+        ],
+    ]);
+
+    register_rest_field('event', 'rewards', [
+        'get_callback' => function ($object) {
+            $ids = get_post_meta($object['id'], 'rewards', true);
+            return is_array($ids) ? $ids : array_filter(array_map('intval', explode(',', (string)$ids)));
+        },
+        'schema' => [
+            'description' => 'Reward IDs',
+            'type'        => 'array',
+            'items'       => ['type' => 'integer'],
+        ],
+    ]);
+
+    foreach (['lat', 'lon'] as $key) {
+        register_rest_field('event', $key, [
+            'get_callback' => fn($object) => get_post_meta($object['id'], $key, true),
+            'schema' => [
+                'description' => ucfirst($key),
+                'type'        => 'number',
+            ],
+        ]);
+    }
+
     // Exposing quiz fields
     register_rest_field('quiz', 'question', [
         'get_callback' => function ($object) {
@@ -360,7 +406,6 @@ add_action('rest_api_init', function () {
 
     register_rest_field('quiz', 'alternatives', [
         'get_callback' => function ($object) {
-            // stored as array in meta — return as array (or empty array)
             $alts = get_post_meta($object['id'], 'alternatives', true);
             if (empty($alts)) return [];
             return (array) $alts;
@@ -400,21 +445,21 @@ add_action('rest_api_init', function () {
             ]);
         }
     }
-    // Item post type → 2D + 3D
+    // Item post type 2D + 3D
     register_image_fields('item', [
         'image_2d' => '2d',
         'image_3d' => '3d',
     ]);
-    // Card post type → front + back
+    // Card post type front + back
     register_image_fields('card', [
         'front_image' => 'front',
         'back_image'  => 'back',
     ]);
-    // Asset2D post type → single image
+    // Asset2D post type single image
     register_image_fields('asset2d', [
         'image' => 'image',
     ]);
-    // Event post type → single image
+    // Event post type single image
     register_image_fields('event', [
         'image' => 'image',
     ]);
