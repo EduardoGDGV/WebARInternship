@@ -40,6 +40,7 @@ type Event struct {
 	Requirements []int   `json:"requirements"` // IDs
 	Rewards      []int   `json:"rewards"`      // IDs
 	UpdatedAt    string  `json:"updated_at,omitempty"`
+	ExpireAt     int     `json:"expire_at,omitempty"`
 }
 
 // Asset2D (visual resource)
@@ -191,27 +192,23 @@ func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error)
 	var title string
 
 	switch t := post["title"].(type) {
-		case string:
-			title = t
-		case map[string]any:
-			if rendered, ok := t["rendered"].(string); ok {
-				title = rendered
-			}
+	case string:
+		title = t
+	case map[string]any:
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		}
 	}
 
 	var lat, lon float64
-	var coordinates = map[string]any{}
-	if v, ok := post["coordinates"]; ok {
-		coordinates = v.(map[string]any)
-		if v, ok := coordinates["lat"]; ok {
-			if f, err := parseFloatV(v); err == nil {
-				lat = f
-			}
+	if v, ok := post["lat"]; ok {
+		if f, err := parseFloatV(v); err == nil {
+			lat = f
 		}
-		if v, ok := coordinates["lon"]; ok {
-			if f, err := parseFloatV(v); err == nil {
-				lon = f
-			}
+	}
+	if v, ok := post["lon"]; ok {
+		if f, err := parseFloatV(v); err == nil {
+			lon = f
 		}
 	}
 
@@ -227,6 +224,8 @@ func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error)
 	req := parseIntArray(getArrayFromMap(post, "requirements"))
 	rew := parseIntArray(getArrayFromMap(post, "rewards"))
 
+	expiration := int(post["expire_at"].(float64))
+
 	ev := Event{
 		ID:           idf,
 		Title:        title,
@@ -236,6 +235,7 @@ func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error)
 		Requirements: req,
 		Rewards:      rew,
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
+		ExpireAt:     expiration,
 	}
 	return ev, nil
 }
@@ -247,12 +247,12 @@ func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, er
 	var title string
 
 	switch t := post["title"].(type) {
-		case string:
-			title = t
-		case map[string]any:
-			if rendered, ok := t["rendered"].(string); ok {
-				title = rendered
-			}
+	case string:
+		title = t
+	case map[string]any:
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		}
 	}
 	logger.Info("Asset title %s", title)
 
@@ -278,12 +278,12 @@ func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
 	var title string
 
 	switch t := post["title"].(type) {
-		case string:
-			title = t
-		case map[string]any:
-			if rendered, ok := t["rendered"].(string); ok {
-				title = rendered
-			}
+	case string:
+		title = t
+	case map[string]any:
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		}
 	}
 
 	var front, back string
@@ -316,12 +316,12 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 	var title string
 
 	switch t := post["title"].(type) {
-		case string:
-			title = t
-		case map[string]any:
-			if rendered, ok := t["rendered"].(string); ok {
-				title = rendered
-			}
+	case string:
+		title = t
+	case map[string]any:
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		}
 	}
 
 	// Parse images
@@ -347,12 +347,12 @@ func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
 	var title string
 
 	switch t := post["title"].(type) {
-		case string:
-			title = t
-		case map[string]any:
-			if rendered, ok := t["rendered"].(string); ok {
-				title = rendered
-			}
+	case string:
+		title = t
+	case map[string]any:
+		if rendered, ok := t["rendered"].(string); ok {
+			title = rendered
+		}
 	}
 
 	var question string
@@ -393,7 +393,6 @@ func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
 }
 
 // Storage helpers
-
 func storageKeyFor(id int) string {
 	return fmt.Sprintf("%d", id)
 }
@@ -461,8 +460,8 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		status = s
 	}
 
-	// Handle delete/trash
-	if status == "delete" || status == "trash" {
+	// Handle trash event
+	if status == "trash" {
 		coll, ok := collectionByType[typeVal]
 		if !ok {
 			logger.Error("Unknown type on delete: %s", typeVal)
