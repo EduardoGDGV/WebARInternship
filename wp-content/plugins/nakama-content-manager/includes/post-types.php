@@ -31,6 +31,9 @@ function nakama_register_post_types() {
         'type' => 'array', 'single' => true,
         'show_in_rest' => ['schema' => ['type' => 'array', 'items' => ['type' => 'integer']]]
     ]);
+    register_post_meta('event', 'expire_at', [
+        'type' => 'string', 'single' => true, 'show_in_rest' => true,
+    ]);
 
     // 2D Asset
     register_post_type('asset2d', [
@@ -119,7 +122,7 @@ add_action('add_meta_boxes', function() {
 
 
 /**
- * Meta Box Renderer
+ * Meta Box Renderers
  */
 function nakama_render_meta_box($post) {
     wp_nonce_field('nakama_meta_save', 'nakama_meta_nonce');
@@ -148,6 +151,18 @@ function nakama_render_meta_box($post) {
 
         $reqs = (array) get_post_meta($post->ID, 'requirements', true);
         $rewards = (array) get_post_meta($post->ID, 'rewards', true);
+        $expire_at = get_post_meta($post->ID, 'expire_at', true);
+        $date_str = '';
+        if (!empty($expire_at)) {
+            if (is_numeric($expire_at)) {
+                $date_str = date('Y-m-d\TH:i', intval($expire_at));
+            } else {
+                $timestamp = strtotime($expire_at);
+                if ($timestamp) {
+                    $date_str = date('Y-m-d\TH:i', $timestamp);
+                }
+            }
+        }
         ?>
             <div class="nak-row">
                 <label class="nak-label">Requirements</label>
@@ -165,6 +180,20 @@ function nakama_render_meta_box($post) {
                     data-types="item"
                     data-meta-value="<?php echo esc_attr(implode(',', array_map('intval', $rewards))); ?>">
                 </div>
+            </div>
+
+            <div class="nak-row">
+                <label class="nak-label" for="expire_at">Expiration Date</label>
+                <input
+                    type="datetime-local"
+                    id="expire_at"
+                    name="expire_at"
+                    value="<?php echo esc_attr($date_str); ?>"
+                    style="width:100%;"
+                />
+                <p style="font-style:italic;color:#666;margin:4px 0 0;">
+                    Leave empty for no expiration.
+                </p>
             </div>
         <?php
     }
@@ -299,10 +328,10 @@ function nak_media($key, $post, $type = 'image') {
 /**
  * Save callback
  */
-add_action('save_post', function($post_id) {
-    if (!isset($_POST['nakama_meta_nonce']) ||
-        !wp_verify_nonce($_POST['nakama_meta_nonce'], 'nakama_meta_save')) return;
+add_action('save_post', function($post_id, $post) {
+    if (wp_is_post_revision($post_id)) return;
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
+    if (!current_user_can('edit_post', $post_id)) return;
 
     $type = get_post_type($post_id);
 
@@ -324,7 +353,7 @@ add_action('save_post', function($post_id) {
             update_post_meta($post_id, 'question', sanitize_text_field($_POST['question']));
         }
 
-        return; // Stop here for quiz, don't update unrelated fields
+        return;
     }
 
     $fields = ['lat','lon','image','front_image','back_image',
@@ -347,12 +376,35 @@ add_action('save_post', function($post_id) {
             delete_post_meta($post_id, $arr);
         }
     }
-});
 
-add_filter('upload_mimes', function ($mimes) {
-    $mimes['glb']  = 'model/gltf-binary';
-    $mimes['gltf'] = 'model/gltf+json';
-    return $mimes;
+    $expire_raw = $_POST['expire_at'] ?? '';
+    wp_clear_scheduled_hook('nakama_delete_expired_event', [$post_id]);
+    if (!empty($expire_raw)) {
+        $timestamp = strtotime(sanitize_text_field($expire_raw));
+        if ($timestamp && $timestamp > 0) {
+            update_post_meta($post_id, 'expire_at', $timestamp);
+
+            // Schedule delete
+            if ($timestamp > time()) {
+                if (!wp_next_scheduled('nakama_delete_expired_event', [$post_id])) {
+                    wp_schedule_single_event($timestamp, 'nakama_delete_expired_event', [$post_id]);
+                }
+            }
+        }
+    } else {
+        delete_post_meta($post_id, 'expire_at');
+    }
+
+}, 10, 2);
+
+add_action('nakama_delete_expired_event', function($post_id) {
+    $post = get_post($post_id);
+    if (!$post || $post->post_type !== 'event') return;
+
+    $expire_at = intval(get_post_meta($post_id, 'expire_at', true));
+    if ($expire_at && $expire_at <= time()) {
+        wp_delete_post($post_id, true);
+    }
 });
 
 // Register how media appears in REST (URLs)
@@ -391,6 +443,18 @@ add_action('rest_api_init', function () {
             ],
         ]);
     }
+
+    register_rest_field('event', 'expire_at', [
+        'get_callback' => function ($object) {
+            $timestamp = intval(get_post_meta($object['id'], 'expire_at', true));
+            return $timestamp ?: null;
+        },
+        'schema' => [
+            'description' => 'Event expiration time as UNIX timestamp (UTC).',
+            'type'        => 'integer',
+            'context'     => ['view', 'edit'],
+        ],
+    ]);
 
     // Exposing quiz fields
     register_rest_field('quiz', 'question', [
@@ -463,4 +527,10 @@ add_action('rest_api_init', function () {
     register_image_fields('event', [
         'image' => 'image',
     ]);
+});
+
+add_filter('upload_mimes', function ($mimes) {
+    $mimes['glb']  = 'model/gltf-binary';
+    $mimes['gltf'] = 'model/gltf+json';
+    return $mimes;
 });

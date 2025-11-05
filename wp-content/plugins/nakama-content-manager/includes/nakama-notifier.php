@@ -2,19 +2,20 @@
 if (!defined('ABSPATH')) exit;
 
 add_action('save_post', 'nakama_notify_save', 10, 3);
+add_action('wp_trash_post', 'nakama_notify_delete', 10);
 add_action('before_delete_post', 'nakama_notify_delete', 10);
 
 function nakama_notify_save($post_id, $post, $update) {
     if (wp_is_post_revision($post_id)) return;
-    if (get_post_status($post_id) === 'auto-draft') return;
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
+    if (get_post_status($post_id) !== 'publish') return;
 
     $type = get_post_type($post_id);
     $supported = ['event', 'asset2d', 'card', 'item', 'quiz'];
     if (!in_array($type, $supported)) return;
 
     $payload = [
-        "id" => $post_id,
+        "id" => is_numeric($post_id) ? intval($post_id) : $post_id,
         "type" => $type,
         "title" => get_the_title($post_id),
         "status" => get_post_status($post_id),
@@ -26,16 +27,15 @@ function nakama_notify_save($post_id, $post, $update) {
             // lat/lon as floats
             $lat_meta = get_post_meta($post_id, 'lat', true);
             $lon_meta = get_post_meta($post_id, 'lon', true);
-            $payload['coordinates'] = [
-                "lat" => is_numeric($lat_meta) ? floatval($lat_meta) : 0.0,
-                "lon" => is_numeric($lon_meta) ? floatval($lon_meta) : 0.0,
-            ];
+            $payload["lat"] = is_numeric($lat_meta) ? floatval($lat_meta) : 0.0;
+            $payload["lon"] = is_numeric($lon_meta) ? floatval($lon_meta) : 0.0;
             // marker image (attachment url)
             $payload['image'] = nakama_get_image_url(get_post_meta($post_id, 'image', true));
-
             // unified relations (always arrays)
             $payload['requirements'] = get_post_meta($post_id, 'requirements', true) ?: [];
             $payload['rewards']      = get_post_meta($post_id, 'rewards', true) ?: [];
+            $expiration = get_post_meta($post_id, 'expire_at', true);
+            $payload['expire_at'] = is_numeric($expiration) ? intval($expiration) : null;
             break;
 
         case 'asset2d':
@@ -55,11 +55,10 @@ function nakama_notify_save($post_id, $post, $update) {
 
         case 'quiz':
             $payload['question']     = get_post_meta($post_id, 'question', true);
-            $payload['alternatives'] = get_post_meta($post_id, 'alternatives', true);
+            $payload['alternatives'] = get_post_meta($post_id, 'alternatives', true) ?: [];
             $payload['answer']       = get_post_meta($post_id, 'answer', true);
             break;
     }
-
     nakama_send_payload($payload);
 }
 
@@ -69,9 +68,9 @@ function nakama_notify_delete($post_id) {
     if (!in_array($type, $supported)) return;
 
     nakama_send_payload([
-        "id" => $post_id,
+        "id" => is_numeric($post_id) ? intval($post_id) : $post_id,
         "type" => $type,
-        "status" => "delete"
+        "status" => "trash"
     ]);
 }
 
