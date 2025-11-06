@@ -8,10 +8,8 @@
   Cell-based visibility is implemented to optimize performance, only showing players in relevant cells.
   
   Missing: 1. Remove player markers on disconnect.
-           2. Real position updates from GPS or other sources.
-           3. Error handling and reconnection logic for the socket.
-           4. Correct assets and their positions.
-           5. Map design and styling.
+           2. Error handling and reconnection logic for the socket.
+           3. Map design and styling.
            etc......
            
 */
@@ -24,7 +22,6 @@ const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 let session = null;
 let socket = null;
 let matchID = null;
-let match = null;
 
 let myMarker = null;
 let myGroup = null;
@@ -33,21 +30,23 @@ let playerLabels = new Map();  // userId -> label (divIcon)
 let cellPlayers = new Map();   // cellKey -> Set(userId)
 let playerCell = new Map();    // userId -> physical cellKey
 let relevantCells = new Set(); // current + neighbor cells
-let buildingMarkers = [];
+let eventMarkers = [];
 
 // Icons
 const redIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png"
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
+  iconAnchor: [12, 41]
 });
 const blueIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png"
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png",
+  iconAnchor: [12, 41]
 });
 const playerIcon = new L.Icon({
-  iconUrl: "http://localhost:8081/wp-content/uploads/2025/10/player1.png",
-  iconSize: [50, 50],
+  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png",
+  iconAnchor: [12, 41]
 });
 
-const CELL_SIZE = 0.001;
+const CELL_SIZE = 0.0004;
 const centerLat = -23.55574;
 const centerLon = -46.72980;
 let currentMap = null;
@@ -71,9 +70,11 @@ function getCell(lat, lon) {
 
 function determineCells(lat, lon) {
   const [baseLat, baseLon] = getCell(lat, lon);
-  const offsetLat = lat - baseLat;
-  const offsetLon = lon - baseLon;
-
+  // center of current cell
+  const centerLat = baseLat + CELL_SIZE / 2;
+  const centerLon = baseLon + CELL_SIZE / 2;
+  const offsetLat = lat - centerLat;
+  const offsetLon = lon - centerLon;
   const keys = [cellKey(baseLat, baseLon)];
 
   if (offsetLat > 0) keys.push(cellKey(baseLat + CELL_SIZE, baseLon));
@@ -96,7 +97,9 @@ function initLeaflet(mapDivId, lat = centerLat, lon = centerLon) {
     minZoom: 16,    // lowest zoom
     maxZoom: 19,   // highest zoom supported by the tile server
   }).addTo(map);
+  currentMap = map;
   myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b><br>Group: ${myGroup || 'None'}`);
+  createPlayerLabel(session.user_id, session.username, myGroup, lat, lon);
 
   const latitudes = mapBounds.map(p => p[0]);
   const longitudes = mapBounds.map(p => p[1]);
@@ -139,36 +142,49 @@ async function initSocket() {
 }
 
 // Buildings
-async function fetchBuildings() {
-  const result = await socket.rpc("get_buildings", "{}");
-  return JSON.parse(result.payload);
+async function fetchEvents() {
+  try {
+    const result = await socket.rpc("get_content", JSON.stringify({ type: "event" }));
+    const events = JSON.parse(result.payload);
+    console.log("Fetched events:", events);
+    return events;
+  } catch (err) {
+    console.error("Failed to fetch events:", err);
+    return [];
+  }
 }
 
-async function addBuildingsToMap(map) {
-  const buildings = await fetchBuildings();
+function addEventsToMap(map, events) {
+  // Remove old event markers
+  eventMarkers.forEach(m => map.removeLayer(m));
+  eventMarkers = [];
 
-  buildingMarkers.forEach(m => map.removeLayer(m));
-  buildingMarkers = [];
+  events.forEach(ev => {
+    if (!ev.lat || !ev.lon) return;
+    const lat = parseFloat(ev.lat);
+    const lon = parseFloat(ev.lon);
+    if (isNaN(lat) || isNaN(lon)) return;
 
-  if (!buildings || buildings.length === 0) return;
-  buildings.forEach(bld => {
-    if (bld.lat != null && bld.lon != null) {
-      const lat = parseFloat(bld.lat);
-      const lon = parseFloat(bld.lon);
-      if (isNaN(lat) || isNaN(lon)) return;
+    const icon = L.icon({
+      iconUrl: ev.image || "http://localhost:8081/wp-content/uploads/default-event.png",
+      iconSize: [60, 60],
+    });
 
-      const icon = L.icon({
-        iconUrl: bld.image || "default.png",
-        iconSize: [50, 50]
-      });
+    const popupContent = `
+      <div style="text-align:center;">
+        <strong>${ev.title}</strong><br>
+        ${ev.requirements?.length ? `<p>Requirements: ${ev.requirements.join(", ")}</p>` : ""}
+        ${ev.rewards?.length ? `<p>Rewards: ${ev.rewards.join(", ")}</p>` : ""}
+        ${ev.expire_at ? `<p>Expires: ${new Date(ev.expire_at * 1000).toLocaleString()}</p>` : ""}
+      </div>
+    `;
 
-      const marker = L.marker([lat, lon], { icon })
-        .addTo(map)
-        .bindPopup(`<b>Building ${bld.id}</b>`);
+    const marker = L.marker([lat, lon], { icon })
+      .addTo(map)
+      .bindPopup(popupContent);
 
-      marker.options.buildingId = bld.id;
-      buildingMarkers.push(marker);
-    }
+    marker.options.eventId = ev.id;
+    eventMarkers.push(marker);
   });
 }
 
@@ -179,7 +195,7 @@ function createPlayerLabel(userId, username, group, lat, lon) {
     className: "player-label",
     html: `<div style="text-align:center; color:white; font-weight:bold; text-shadow:1px 1px 2px black;">${shortId}</div>`,
     iconSize: [100, 20],
-    iconAnchor: [50, 30],
+    iconAnchor: [50, 60],
   });
   const labelMarker = L.marker([lat, lon], { icon: label, interactive: false })
     .addTo(currentMap)
@@ -234,20 +250,54 @@ function removePlayerMarker(userId) {
   }
 }
 
+let cellOverlays = new Map(); // cellKey -> rectangle layer
+function drawCellBorder(cellKeyStr) {
+  const [lat, lon] = cellKeyStr.split(",").map(parseFloat);
+  const bounds = [
+    [lat, lon],
+    [lat + CELL_SIZE, lon + CELL_SIZE]
+  ];
+
+  const rectangle = L.rectangle(bounds, {
+    color: "#00ff00",
+    weight: 1,
+    fillOpacity: 0.05
+  }).addTo(currentMap);
+
+  cellOverlays.set(cellKeyStr, rectangle);
+}
+
+
 // Remove markers from irrelevant cells
 function cleanupCells(newRelevant) {
+  console.log("Cleaning up cells. Current relevant:", relevantCells, "\nNew relevant:", newRelevant);
   for (const cell of relevantCells) {
     if (!newRelevant.has(cell)) {
       const set = cellPlayers.get(cell);
       if (set) {
         for (const userId of set){
-          if (playerMarkers.get(userId)?.options.icon == blueIcon) continue;
+          if (playerMarkers.get(userId)?.options.icon == blueIcon || userId == session.user_id) continue;
           removePlayerMarker(userId);
         }
       }
       cellPlayers.delete(cell);
+
+      // Remove cell rectangle
+      const rect = cellOverlays.get(cell);
+      if (rect) {
+        currentMap.removeLayer(rect);
+        cellOverlays.delete(cell);
+      }
     }
   }
+
+  // Draw new cell borders
+  for (const cell of newRelevant) {
+    if (!cellOverlays.has(cell)) {
+      drawCellBorder(cell);
+    }
+  }
+
   relevantCells = newRelevant;
 }
 
@@ -273,6 +323,11 @@ function setupStreamHandlers() {
     try {
       const { UserID, Pos } = JSON.parse(stream.data);
       if (!UserID || !Pos || UserID === session.user_id) return;
+
+      const myPosition = myMarker.getLatLng();
+
+      if(Math.sqrt(Math.pow(Pos.lat - myPosition.lat, 2) + Math.pow(Pos.lon - myPosition.lng, 2)) > 0.0002) return;
+
       const users = await client.getUsers(session, UserID);
       if (!users || !users.users || users.users.length === 0) return;
       const User = users.users[0];
@@ -329,34 +384,27 @@ function setupStreamHandlers() {
   }
 
   socket.onnotification = (notification) => {
-    const payload = notification.content;
+    const payload = notification.content?.data;
+    const subject = notification.subject;
 
-    if (notification.subject === "building_update") {
-      const bld = payload.data;
-      const lat = parseFloat(bld.lat);
-      const lon = parseFloat(bld.lon);
-      if (isNaN(lat) || isNaN(lon)) return;
-
-      const existing = buildingMarkers.find(m => m.options.buildingId === bld.id);
-      if (existing) {
-        existing.setLatLng([lat, lon]);
-        if (bld.image) existing.setIcon(L.icon({ iconUrl: bld.image, iconSize: [40, 40] }));
-      } else {
-        const marker = L.marker([lat, lon], {
-          icon: L.icon({ iconUrl: bld.image || "default.png", iconSize: [40, 40] })
-        }).addTo(currentMap)
-          .bindPopup(`<a href="${bld.link || '#'}" target="_blank">${bld.title || 'Building' + bld.id}</a>`);
-        marker.options.buildingId = bld.id;
-        buildingMarkers.push(marker);
+    // Handle WP content updates/deletes
+    if (subject === "update" && payload?.type === "event") {
+      console.log("Event update received:", payload);
+      // Update or replace event marker
+      const index = eventMarkers.findIndex(m => m.options.eventId === payload.id);
+      if (index !== -1) {
+        currentMap.removeLayer(eventMarkers[index]);
+        eventMarkers.splice(index, 1);
       }
+      addEventsToMap(currentMap, [payload]);
     }
 
-    if (notification.subject === "building_delete") {
-      const bld = payload.data;
-      const index = buildingMarkers.findIndex(m => m.options.buildingId === bld.id);
+    if (subject === "delete" && payload?.type === "event") {
+      console.log("Event delete received:", payload);
+      const index = eventMarkers.findIndex(m => m.options.eventId === payload.id);
       if (index !== -1) {
-        currentMap.removeLayer(buildingMarkers[index]);
-        buildingMarkers.splice(index, 1);
+        currentMap.removeLayer(eventMarkers[index]);
+        eventMarkers.splice(index, 1);
       }
     }
   }
@@ -428,6 +476,7 @@ function startPositionUpdates() {
   const INTERVAL_MS = 1000;
   let lat = centerLat;
   let lon = centerLon;
+  let circle = null;
   setInterval(async () => {
     if (!myMarker) return;
 
@@ -436,12 +485,16 @@ function startPositionUpdates() {
 
     myMarker.setLatLng([lat, lon]);
 
+    if(circle) currentMap.removeLayer(circle);
+    circle = L.circle([lat, lon], {
+      radius: 20, // meters
+      color: 'blue',        // outline color
+      fillColor: '#30f',    // fill color
+      fillOpacity: 0.2,     // transparency
+    }).addTo(currentMap);
+
     // Update label position
-    if (playerLabels.has(session.user_id)) {
-      playerLabels.get(session.user_id).setLatLng([lat, lon]);
-    } else {
-      createPlayerLabel(session.user_id, session.username, myGroup, lat, lon);
-    }
+    playerLabels.get(session.user_id)?.setLatLng([lat, lon]);
 
     // keep cells in sync
     const newRelevant = new Set(determineCells(lat, lon));
@@ -478,7 +531,8 @@ export async function initMap(mapDivId) {
   await socket.joinMatch(matchID);
 
   const map = initLeaflet(mapDivId);
-  await addBuildingsToMap(map);
+  const events = await fetchEvents();
+  addEventsToMap(map, events);
 
   const account = await client.getAccount(session);
   const metadata = typeof account.user.metadata === "string"

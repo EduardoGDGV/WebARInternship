@@ -18,8 +18,8 @@ type Position struct {
 	Lon float64 `json:"lon"`
 }
 
-// Each stream cell covers ~100 meters
-const CELL_SIZE float64 = 0.001
+// Each stream cell covers ~40 meters
+const CELL_SIZE float64 = 0.0004
 
 // Caches
 var (
@@ -40,28 +40,26 @@ func getCell(lat, lon float64) (float64 , float64) {
 
 func determineCells(lat, lon float64) []string {
 	baseLat, baseLon := getCell(lat, lon)
-	offsetLat := lat - baseLat
-	offsetLon := lon - baseLon
+	centerLat := baseLat + CELL_SIZE/2
+	centerLon := baseLon + CELL_SIZE/2
+	offsetLat := lat - centerLat
+	offsetLon := lon - centerLon
 
 	// First cell is always the base cell
 	keys := []string{cellKey(baseLat, baseLon)}
 
 	if offsetLat > 0 {
 		keys = append(keys, cellKey(baseLat+CELL_SIZE, baseLon))
-		baseLat += CELL_SIZE
 	} else if offsetLat < 0 {
 		keys = append(keys, cellKey(baseLat-CELL_SIZE, baseLon))
-		baseLat -= CELL_SIZE
 	}
 	if offsetLon > 0 {
 		keys = append(keys, cellKey(baseLat, baseLon+CELL_SIZE))
-		baseLon += CELL_SIZE
 	} else if offsetLon < 0 {
 		keys = append(keys, cellKey(baseLat, baseLon-CELL_SIZE))
-		baseLon -= CELL_SIZE
 	}
 	if offsetLat != 0 && offsetLon != 0 {
-		keys = append(keys, cellKey(baseLat, baseLon))
+		keys = append(keys, cellKey(baseLat+(math.Copysign(CELL_SIZE, offsetLat)), baseLon+(math.Copysign(CELL_SIZE, offsetLon))))
 	}
 	return keys
 }
