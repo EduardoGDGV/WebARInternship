@@ -326,10 +326,10 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 
 	// Parse images
 	var img2d, img3d string
-	if v, ok := post["2d"]; ok {
+	if v, ok := post["image2d"]; ok {
 		img2d = v.(string)
 	}
-	if v, ok := post["3d"]; ok {
+	if v, ok := post["image3d"]; ok {
 		img3d = v.(string)
 	}
 

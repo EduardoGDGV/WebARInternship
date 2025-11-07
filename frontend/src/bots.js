@@ -8,7 +8,7 @@ process.on("unhandledRejection", (reason) => {
 const client = new Client("defaultkey", "127.0.0.1", "7350", false);
 
 const NUM_BOTS = 800;       // total bots
-const BATCH_SIZE = 1;       // spawn bots per batch
+const BATCH_SIZE = 5;       // spawn bots per batch
 const CONCURRENCY_LIMIT = 20; // max bots simultaneously connecting
 const bots = [];
 let cleaningUp = false;
@@ -35,7 +35,9 @@ async function createBot(i) {
       socketClosed = true;
       console.error(`Bot ${i} socket error:`, err);
       setTimeout(() => {
-        try { socket.close(); } catch {}
+        try { socket.close(); } catch {
+          return;
+        }
       }, 100);
     };
 
@@ -45,7 +47,7 @@ async function createBot(i) {
 
     try {
       await socket.connect(session, true);
-      await sleep(100);
+      await sleep(400);
       console.log(`Bot ${i} connected`);
     } catch (e) {
       console.warn(`Bot ${i} connection attempt failed`, e);
@@ -54,14 +56,19 @@ async function createBot(i) {
     // Initial random position
     let lat = -23.55574 + (Math.random() - 0.5) * 0.002;
     let lon = -46.72980 + (Math.random() - 0.5) * 0.002;
-
+    let matchID = null;
     if (!socket) return;
-    const res = await socket.rpc("get_match");
-    if (!res) return;
-    const matchID = res.payload;
-    console.log(`Bot ${i} joining match:`, matchID);
-    if (!matchID) return;
-    await socket.joinMatch(matchID);
+    try {
+      const res = await socket.rpc("get_match");
+      if (!res) return;
+      matchID = res.payload;
+      console.log(`Bot ${i} joining match:`, matchID);
+      if (!matchID) return;
+      await socket.joinMatch(matchID);
+    } catch (e) {
+      console.error(`Bot ${i} failed joining match:`, e);
+      return;
+    }
 
     async function botLoop() {
       // Random walk
@@ -70,7 +77,6 @@ async function createBot(i) {
 
       if (cleaningUp || socketClosed) return;
       try {
-        //await socket.rpc("update_position", JSON.stringify({ lat, lon }));
         var opCode = 1;
         socket.sendMatchState(matchID, opCode, JSON.stringify({ lat, lon }));
       } catch (e) {
@@ -94,13 +100,13 @@ async function spawnBots() {
   for (let i = 0; i < NUM_BOTS; i++) {
     // Wait if concurrency limit reached
     while (active >= CONCURRENCY_LIMIT) {
-      await sleep(200);
+      await sleep(250);
     }
     active++;
     createBot(i).finally(() => active--);
 
     // Small delay between batches to prevent overload
-    if (i % BATCH_SIZE === 0) await sleep(200);
+    if (active % BATCH_SIZE === 0 && active !== 0) await sleep(500);
   }
 
   // Wait until all active bots finish connecting
@@ -137,5 +143,5 @@ process.on("SIGINT", cleanupBots);
 (async () => {
   await spawnBots();
   // Auto-cleanup after 80s
-  setTimeout(cleanupBots, 160000);
+  setTimeout(cleanupBots, 80000);
 })();

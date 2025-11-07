@@ -365,7 +365,12 @@ var (
 // rpcGetMatch ensures a single match per group using runtime memory only.
 func rpcGetMatch(ctx context.Context, nk runtime.NakamaModule, logger runtime.Logger) (string, error) {
 	userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-	groupName := getUserGroup(ctx, nk, userID)
+	//groupName := getUserGroup(ctx, nk, userID)
+	groupName := ""
+	groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
+	if err == nil && len(groups) > 0 {
+		groupName = groups[0].Group.Name
+	}
 	if groupName == "" {
 		return "", fmt.Errorf("user %s has no group", userID)
 	}
