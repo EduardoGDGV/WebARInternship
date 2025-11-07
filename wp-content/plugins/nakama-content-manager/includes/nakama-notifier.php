@@ -49,8 +49,8 @@ function nakama_notify_save($post_id, $post, $update) {
             break;
 
         case 'item':
-            $payload['2d'] = nakama_get_image_url(get_post_meta($post_id, 'image_2d', true));
-            $payload['3d'] = nakama_get_image_url(get_post_meta($post_id, 'image_3d', true));
+            $payload['image2d'] = nakama_get_image_url(get_post_meta($post_id, 'image_2d', true));
+            $payload['image3d'] = nakama_get_image_url(get_post_meta($post_id, 'image_3d', true));
             break;
 
         case 'quiz':

@@ -21,6 +21,8 @@ jQuery(function($){
 
     function initMultiSelectPicker(container) {
         const $container = $(container);
+        if ($container.data('initialized')) return;
+        $container.data('initialized', true);
         const metaKey = $container.data('meta-key');
         const allowedTypes = $container.data('types').split(',');
         let options = [];
@@ -68,7 +70,9 @@ jQuery(function($){
 
         // Fetch options from REST API
         fetchPostsForTypes(allowedTypes).then(list => {
+            $noItems.text('Loading items...');
             options = list;
+            options.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base' }));
             refreshList();
         });
 

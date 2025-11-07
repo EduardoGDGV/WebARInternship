@@ -111,13 +111,32 @@ function nakama_register_post_types() {
 
 
 /**
- * Add a single Meta Box UI for each type
+ * Add a Meta Box UI for each type
  */
 add_action('add_meta_boxes', function() {
     $types = ['event', 'card', 'item', 'quiz', 'asset2d'];
+
+    // Main Nakama Settings meta box
     foreach ($types as $type) {
-        add_meta_box('nakama_meta', 'Nakama Settings', 'nakama_render_meta_box', $type, 'normal', 'default');
+        add_meta_box(
+            'nakama_meta',
+            'Nakama Settings',
+            'nakama_render_meta_box',
+            $type,
+            'normal',
+            'default'
+        );
     }
+
+    // Separate "Expiration" box in sidebar for events
+    add_meta_box(
+        'nakama_event_expiration',
+        'Event Expiration',
+        'nakama_event_expiration_box',
+        'event',
+        'side',
+        'low'
+    );
 });
 
 
@@ -148,21 +167,8 @@ function nakama_render_meta_box($post) {
         nak_input('lat', $post);
         nak_input('lon', $post);
         nak_media('image', $post);
-
         $reqs = (array) get_post_meta($post->ID, 'requirements', true);
         $rewards = (array) get_post_meta($post->ID, 'rewards', true);
-        $expire_at = get_post_meta($post->ID, 'expire_at', true);
-        $date_str = '';
-        if (!empty($expire_at)) {
-            if (is_numeric($expire_at)) {
-                $date_str = date('Y-m-d\TH:i', intval($expire_at));
-            } else {
-                $timestamp = strtotime($expire_at);
-                if ($timestamp) {
-                    $date_str = date('Y-m-d\TH:i', $timestamp);
-                }
-            }
-        }
         ?>
             <div class="nak-row">
                 <label class="nak-label">Requirements</label>
@@ -180,20 +186,6 @@ function nakama_render_meta_box($post) {
                     data-types="item"
                     data-meta-value="<?php echo esc_attr(implode(',', array_map('intval', $rewards))); ?>">
                 </div>
-            </div>
-
-            <div class="nak-row">
-                <label class="nak-label" for="expire_at">Expiration Date</label>
-                <input
-                    type="datetime-local"
-                    id="expire_at"
-                    name="expire_at"
-                    value="<?php echo esc_attr($date_str); ?>"
-                    style="width:100%;"
-                />
-                <p style="font-style:italic;color:#666;margin:4px 0 0;">
-                    Leave empty for no expiration.
-                </p>
             </div>
         <?php
     }
@@ -243,19 +235,58 @@ function nakama_render_meta_box($post) {
     }
 }
 
+function nakama_event_expiration_box($post) {
+    $expire_at = get_post_meta($post->ID, 'expire_at', true);
+    $date_str = '';
+
+    if (!empty($expire_at)) {
+        $timestamp = is_numeric($expire_at) ? intval($expire_at) : strtotime($expire_at);
+        if ($timestamp) {
+            // Convert to local site time for display
+            $date_str = wp_date('Y-m-d\TH:i', $timestamp);
+        }
+    }
+    ?>
+    <div class="nak-row">
+        <label class="nak-label" for="expire_at">Expiration Date</label>
+        <input
+            type="datetime-local"
+            id="expire_at"
+            name="expire_at"
+            value="<?php echo esc_attr($date_str); ?>"
+            style="width:100%;"
+        />
+        <p style="font-style:italic;color:#666;margin:4px 0 0;">
+            Leave empty for no expiration.
+        </p>
+    </div>
+    <?php
+}
 
 /**
  * Field helpers
  */
 function nak_input($key, $post, $label = null) {
     $label = $label ?: ucfirst($key);
-    $val = esc_attr(get_post_meta($post->ID, $key, true));
+    $meta  = get_post_meta($post->ID, $key, true);
+    // Detect if value is numeric
+    $is_float = is_numeric($meta) || in_array($key, ['lat', 'lon']); // auto-flag for lat/lon or numeric values
+    $val = esc_attr($meta !== '' ? $meta : ($is_float ? '0.0' : ''));
+    if ($is_float && is_numeric($meta)) {
+        $val = number_format((float)$meta, 5, '.', '');
+    }
     $id  = esc_attr($post->post_type . '_' . $key);
+    $float_class = $is_float ? 'nak-float-input' : '';
 
     echo "<div class='nak-row'>
             <label class='nak-label' for='{$id}'>{$label}</label>
-            <input id='{$id}' type='text' name='{$key}' value='{$val}' class='widefat' />
+            <input id='{$id}' type='text' name='{$key}' value='{$val}' class='widefat {$float_class}' />
           </div>";
+}
+
+function nakama_sanitize_float($val) {
+    $val = strtr($val, [',' => '.']);
+    return is_numeric($val = preg_replace('/[^0-9.\-]/', '', $val)) ? (float)$val : 0.0;
 }
 
 function nak_checkbox($key, $post) {
@@ -329,47 +360,47 @@ function nak_media($key, $post, $type = 'image') {
  * Save callback
  */
 add_action('save_post', function($post_id, $post) {
+    // Basic safety checks
     if (wp_is_post_revision($post_id)) return;
     if (defined('DOING_AUTOSAVE') && DOING_AUTOSAVE) return;
     if (!current_user_can('edit_post', $post_id)) return;
 
     $type = get_post_type($post_id);
 
-    if ($type === 'quiz') {
-        $letters = ['A', 'B', 'C', 'D'];
-        $alts = [];
-        foreach ($letters as $label) {
-            if(isset($_POST['alt'.$label])) {
-                $alts[] = sanitize_text_field($_POST['alt'.$label]);
-            }
-        }
-        update_post_meta($post_id, 'alternatives', $alts);
-
-        if(isset($_POST['correct'])) {
-            update_post_meta($post_id, 'answer', sanitize_text_field($_POST['correct']));
-        }
-
-        if(isset($_POST['question'])) {
-            update_post_meta($post_id, 'question', sanitize_text_field($_POST['question']));
-        }
-
-        return;
+    switch ($type) {
+        case 'quiz':
+            nakama_save_quiz($post_id);
+            break;
+        case 'event':
+            nakama_save_event($post_id);
+            break;
+        case 'card':
+            nakama_save_card($post_id);
+            break;
+        /*case 'item':
+            nakama_save_item($post_id);
+            break;
+        case 'asset2d':
+            nakama_save_asset2d($post_id);
+            break;*/
     }
+}, 10, 2);
 
-    $fields = ['lat','lon','image','front_image','back_image',
-        'image_2d','image_3d','question','answer'];
 
+function nakama_save_event($post_id) {
+    $fields = ['lat','lon','image','front_image','back_image','image_2d','image_3d'];
     foreach ($fields as $f) {
-        if (isset($_POST[$f])) update_post_meta($post_id,$f,sanitize_text_field($_POST[$f]));
+        if (!isset($_POST[$f])) continue;
+        $val = sanitize_text_field($_POST[$f]);
+        if (in_array($f, ['lat','lon'])) {
+            $val = nakama_sanitize_float($val);
+        }
+        update_post_meta($post_id, $f, $val);
     }
 
-    // Boolean
-    update_post_meta($post_id,'group_card', isset($_POST['group_card']));
-
-    // Multi selects
+    // Requirements & rewards arrays
     foreach (['requirements', 'rewards'] as $arr) {
         if (isset($_POST[$arr])) {
-            // Convert comma-separated string into array of ints
             $vals = is_array($_POST[$arr]) ? $_POST[$arr] : explode(',', $_POST[$arr]);
             update_post_meta($post_id, $arr, array_map('intval', $vals));
         } else {
@@ -377,25 +408,40 @@ add_action('save_post', function($post_id, $post) {
         }
     }
 
+    // Expiration scheduling
     $expire_raw = $_POST['expire_at'] ?? '';
     wp_clear_scheduled_hook('nakama_delete_expired_event', [$post_id]);
     if (!empty($expire_raw)) {
-        $timestamp = strtotime(sanitize_text_field($expire_raw));
-        if ($timestamp && $timestamp > 0) {
-            update_post_meta($post_id, 'expire_at', $timestamp);
-
-            // Schedule delete
+        $expire_raw = sanitize_text_field($expire_raw);
+        $timezone = wp_timezone();
+        $datetime = date_create_from_format('Y-m-d\TH:i', $expire_raw, $timezone);
+        if ($datetime) {
+            $timestamp = $datetime->getTimestamp();
+            update_post_meta($post_id, 'expire_at', (string)$timestamp);
             if ($timestamp > time()) {
+                if (defined('WP_IMPORTING') && WP_IMPORTING) return;
                 if (!wp_next_scheduled('nakama_delete_expired_event', [$post_id])) {
                     wp_schedule_single_event($timestamp, 'nakama_delete_expired_event', [$post_id]);
                 }
+            } else {
+                // Store warning
+                set_transient('nakama_expire_warning_' . get_current_user_id(), true, 30);
+                delete_post_meta($post_id, 'expire_at');
             }
         }
     } else {
         delete_post_meta($post_id, 'expire_at');
     }
+}
 
-}, 10, 2);
+add_action('admin_notices', function() {
+    if (get_transient('nakama_expire_warning_' . get_current_user_id())) {
+        delete_transient('nakama_expire_warning_' . get_current_user_id());
+        echo '<div class="notice notice-warning is-dismissible">
+                <p><strong>Warning:</strong> Expiration date was set in the past. The event was saved without an expiration.</p>
+              </div>';
+    }
+});
 
 add_action('nakama_delete_expired_event', function($post_id) {
     $post = get_post($post_id);
@@ -406,6 +452,38 @@ add_action('nakama_delete_expired_event', function($post_id) {
         wp_delete_post($post_id, true);
     }
 });
+
+function nakama_save_quiz($post_id) {
+    // Question
+    if (isset($_POST['question'])) {
+        $question = sanitize_text_field($_POST['question']);
+        update_post_meta($post_id, 'question', $question);
+    }
+
+    // Alternatives
+    $alts = [];
+    foreach (['A', 'B', 'C', 'D'] as $label) {
+        if (isset($_POST['alt' . $label])) {
+            $alts[] = sanitize_text_field($_POST['alt' . $label]);
+        }
+    }
+    update_post_meta($post_id, 'alternatives', $alts);
+
+    // Correct answer
+    if (isset($_POST['correct'])) {
+        $answer = sanitize_text_field($_POST['correct']);
+        update_post_meta($post_id, 'answer', $answer);
+    }
+}
+
+function nakama_save_card($post_id) {
+    $fields = ['front_image','back_image','group_card'];
+    foreach ($fields as $f) {
+        if (!isset($_POST[$f])) continue;
+        $val = ($f === 'group_card') ? (bool)$_POST[$f] : sanitize_text_field($_POST[$f]);
+        update_post_meta($post_id, $f, $val);
+    }
+}
 
 // Register how media appears in REST (URLs)
 add_action('rest_api_init', function () {
@@ -475,7 +553,7 @@ add_action('rest_api_init', function () {
             return (array) $alts;
         },
         'schema' => [
-            'description' => 'Quiz alternatives (A..D)',
+            'description' => 'Quiz alternatives (A|B|C|D)',
             'type'        => 'array',
             'items'       => ['type' => 'string'],
             'context'     => ['view', 'edit'],
@@ -511,8 +589,8 @@ add_action('rest_api_init', function () {
     }
     // Item post type 2D + 3D
     register_image_fields('item', [
-        'image_2d' => '2d',
-        'image_3d' => '3d',
+        'image_2d' => 'image2d',
+        'image_3d' => 'image3d',
     ]);
     // Card post type front + back
     register_image_fields('card', [
