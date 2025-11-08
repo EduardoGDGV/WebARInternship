@@ -55,7 +55,7 @@ type Asset2D struct {
 type Card struct {
 	ID        int    `json:"id"`
 	Title     string `json:"title"`
-	Front     string `json:"front"` // resolved URLs
+	Front     string `json:"front"`
 	Back      string `json:"back"`
 	GroupCard bool   `json:"group_card"`
 	UpdatedAt string `json:"updated_at,omitempty"`
@@ -66,7 +66,7 @@ type Item struct {
 	ID        int    `json:"id"`
 	Title     string `json:"title"`
 	Image2D   string `json:"image_2d"`
-	Image3D   string `json:"image_3d"` // could be URL or file name
+	Image3D   string `json:"image_3d"`
 	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
@@ -85,12 +85,11 @@ type WPIncoming struct {
 	ID      int             `json:"id"`
 	Type    string          `json:"type"` // asset2d, card, item, quiz, event
 	Title   string          `json:"title,omitempty"`
-	Status  string          `json:"status,omitempty"`  // publish, update, delete, trash
-	Content json.RawMessage `json:"content,omitempty"` // optional: already-shaped content
+	Status  string          `json:"status,omitempty"`  // publish or trash
+	Content json.RawMessage `json:"content,omitempty"` // already-shaped content
 }
 
 // HTTP client / WP fetch
-
 var httpClient = &http.Client{Timeout: httpTimeout}
 
 // getArrayFromMap -> []any
@@ -163,9 +162,7 @@ func parseIntArray(arr []any) []int {
 	return out
 }
 
-// Fetch from WordPress (initial population)
-
-// fetchPostsForType fetches WP posts for a given post type (rest endpoint e.g. /wp/v2/event)
+// fetchPostsForType fetches WP posts for a given post type (rest endpoint /wp/v2/'type')
 func fetchPostsForType(logger runtime.Logger, postType string) ([]map[string]any, error) {
 	url := fmt.Sprintf("%s/%s?per_page=100", wpBase, postType)
 	logger.Info("WP fetch: %s", url)
@@ -185,8 +182,7 @@ func fetchPostsForType(logger runtime.Logger, postType string) ([]map[string]any
 	return posts, nil
 }
 
-// Convert WP post map -> typed model
-
+// Convert WP 'event' post
 func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error) {
 	idf := int(post["id"].(float64))
 	var title string
@@ -572,7 +568,6 @@ func rpcGetContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 	}
 
 	results := []map[string]any{}
-
 	// iterate collections
 	for t, coll := range collectionByType {
 		if requestedType != "" && requestedType != t {
@@ -594,7 +589,6 @@ func rpcGetContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk ru
 			results = append(results, m)
 		}
 	}
-
 	resB, _ := json.Marshal(results)
 	return string(resB), nil
 }
@@ -610,8 +604,7 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 		return err
 	}
 
-	// Optionally, pre-populate storage on startup by fetching WP posts if storage empty.
-	// We'll attempt to fetch each type if its collection is empty.
+	// Pre-populate storage on startup by fetching WP posts if storage empty.
 	for t, coll := range collectionByType {
 		objects, _, err := nk.StorageList(ctx, "", "", coll, 1, "")
 		if err != nil {

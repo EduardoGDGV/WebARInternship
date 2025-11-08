@@ -38,7 +38,6 @@ const (
 )
 
 // Read/Write in storage
-
 func readInt(nk runtime.NakamaModule, key string, defaultVal int) int {
 	records, err := nk.StorageRead(context.Background(), []*runtime.StorageRead{{
 		Collection: LockCollection,
@@ -72,7 +71,6 @@ func writeInt(nk runtime.NakamaModule, key string, value int) {
 }
 
 // Lock Helpers
-
 func acquireLock(nk runtime.NakamaModule, key string) bool {
 	for attempt := 0; attempt < LockRetryAttempts; attempt++ {
 		// Try to read current lock state
@@ -128,7 +126,6 @@ func releaseLock(nk runtime.NakamaModule, key string) {
 }
 
 // Player Join
-
 func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID string, sessionID string, logger runtime.Logger) {
 	// Acquire lock so only one joiner mutates shared state at a time
 	if !acquireLock(nk, JoinLockKey) {

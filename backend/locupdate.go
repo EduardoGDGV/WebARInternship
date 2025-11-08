@@ -85,7 +85,6 @@ func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) s
 // Core Update Function
 func updatePlayerPosition(nk runtime.NakamaModule, userID, sessionID string, pos Position) {
 	newCells := determineCells(pos.Lat, pos.Lon)
-
 	cellLock.Lock()
 	defer cellLock.Unlock()
 
@@ -108,7 +107,6 @@ func updatePlayerPosition(nk runtime.NakamaModule, userID, sessionID string, pos
 	for _, c := range oldCells {
 		oldCellsMap[c] = struct{}{}
 	}
-
 	for _, cell := range newCells {
 		if _, alreadyJoined := oldCellsMap[cell]; !alreadyJoined {
 			if _, err := nk.StreamUserJoin(StreamMode, "", "", cell, userID, sessionID, false, false, ""); err != nil {
@@ -116,9 +114,7 @@ func updatePlayerPosition(nk runtime.NakamaModule, userID, sessionID string, pos
 			}
 		}
 	}
-
 	playerCells[userID] = newCells
-
 	payload := struct {
 		UserID string   `json:"UserID"`
 		Pos    Position `json:"Pos"`

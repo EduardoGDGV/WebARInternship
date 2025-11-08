@@ -267,7 +267,6 @@ function drawCellBorder(cellKeyStr) {
   cellOverlays.set(cellKeyStr, rectangle);
 }
 
-
 // Remove markers from irrelevant cells
 function cleanupCells(newRelevant) {
   console.log("Cleaning up cells. Current relevant:", relevantCells, "\nNew relevant:", newRelevant);
@@ -323,10 +322,6 @@ function setupStreamHandlers() {
     try {
       const { UserID, Pos } = JSON.parse(stream.data);
       if (!UserID || !Pos || UserID === session.user_id) return;
-
-      const myPosition = myMarker.getLatLng();
-
-      if(Math.sqrt(Math.pow(Pos.lat - myPosition.lat, 2) + Math.pow(Pos.lon - myPosition.lng, 2)) > 0.0002) return;
 
       const users = await client.getUsers(session, UserID);
       if (!users || !users.users || users.users.length === 0) return;
@@ -388,7 +383,7 @@ function setupStreamHandlers() {
     const subject = notification.subject;
 
     // Handle WP content updates/deletes
-    if (subject === "update" && payload?.type === "event") {
+    if (subject === "update") {
       console.log("Event update received:", payload);
       // Update or replace event marker
       const index = eventMarkers.findIndex(m => m.options.eventId === payload.id);
