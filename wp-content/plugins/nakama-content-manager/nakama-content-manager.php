@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: Nakama Content Manager
-Description: Defines structured post types (2D Assets, Cards, Items, Quizzes) and syncs them to Nakama server.
-Version: 1.0
+Description: Defines structured post types (2D Assets, Cards, Items, Quizzes, Events) and syncs them to Nakama server.
+Version: 1.1
 Author: EduardoGDGV
 */
 

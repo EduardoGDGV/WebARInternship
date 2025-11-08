@@ -145,22 +145,12 @@ add_action('add_meta_boxes', function() {
  */
 function nakama_render_meta_box($post) {
     wp_nonce_field('nakama_meta_save', 'nakama_meta_nonce');
-
     $type = get_post_type($post);
-
-    // All selectable related posts (card, item, quiz)
-    $selectable = get_posts([
-        'post_type' => ['card', 'item', 'quiz'],
-        'numberposts' => -1,
-        'orderby' => 'title',
-        'order' => 'ASC'
-    ]);
-
     ?>
-    <style>
-        .nak-row { margin-bottom: 12px; }
-        .nak-label { font-weight:bold; display:block; margin-bottom:4px; }
-    </style>
+        <style>
+            .nak-row { margin-bottom: 12px; }
+            .nak-label { font-weight:bold; display:block; margin-bottom:4px; }
+        </style>
     <?php
 
     if ($type === 'event') {
@@ -174,7 +164,7 @@ function nakama_render_meta_box($post) {
                 <label class="nak-label">Requirements</label>
                 <div class="nakama-multi-select"
                     data-meta-key="requirements"
-                    data-types="quiz,event,item"
+                    data-types="quiz,item"
                     data-meta-value="<?php echo esc_attr(implode(',', array_map('intval', $reqs))); ?>">
                 </div>
             </div>
@@ -183,7 +173,7 @@ function nakama_render_meta_box($post) {
                 <label class="nak-label">Rewards</label>
                 <div class="nakama-multi-select"
                     data-meta-key="rewards"
-                    data-types="item"
+                    data-types="item,card"
                     data-meta-value="<?php echo esc_attr(implode(',', array_map('intval', $rewards))); ?>">
                 </div>
             </div>
@@ -269,25 +259,33 @@ function nakama_event_expiration_box($post) {
 function nak_input($key, $post, $label = null) {
     $label = $label ?: ucfirst($key);
     $meta  = get_post_meta($post->ID, $key, true);
-    // Detect if value is numeric
-    $is_float = is_numeric($meta) || in_array($key, ['lat', 'lon']); // auto-flag for lat/lon or numeric values
-    $val = esc_attr($meta !== '' ? $meta : ($is_float ? '0.0' : ''));
-    if ($is_float && is_numeric($meta)) {
-        $val = number_format((float)$meta, 5, '.', '');
+    $is_float = in_array($key, ['lat', 'lon']);
+    $val = '';
+    if ($meta !== '') {
+        // Format stored number
+        $val = $is_float ? number_format((float)$meta, 5, '.', '') : esc_attr($meta);
     }
+    // Show "0.0" when field is empty
+    $placeholder = $is_float ? '0.0' : '';
     $id  = esc_attr($post->post_type . '_' . $key);
     $float_class = $is_float ? 'nak-float-input' : '';
-
     echo "<div class='nak-row'>
             <label class='nak-label' for='{$id}'>{$label}</label>
-            <input id='{$id}' type='text' name='{$key}' value='{$val}' class='widefat {$float_class}' />
+            <input id='{$id}' type='text' 
+                   name='{$key}' 
+                   value='{$val}' 
+                   placeholder='{$placeholder}'
+                   class='widefat {$float_class}' />
           </div>";
 }
 
 function nakama_sanitize_float($val) {
+    $val = trim($val);
     $val = strtr($val, [',' => '.']);
-    return is_numeric($val = preg_replace('/[^0-9.\-]/', '', $val)) ? (float)$val : 0.0;
+    $val = preg_replace('/[^0-9.\-]/', '', $val);
+    return is_numeric($val) ? (float)$val : '';
 }
+
 
 function nak_checkbox($key, $post) {
     $val = get_post_meta($post->ID, $key, true);
@@ -377,25 +375,32 @@ add_action('save_post', function($post_id, $post) {
         case 'card':
             nakama_save_card($post_id);
             break;
-        /*case 'item':
+        case 'item':
             nakama_save_item($post_id);
             break;
         case 'asset2d':
             nakama_save_asset2d($post_id);
-            break;*/
+            break;
     }
 }, 10, 2);
 
 
 function nakama_save_event($post_id) {
-    $fields = ['lat','lon','image','front_image','back_image','image_2d','image_3d'];
+    $fields = ['lat','lon'];
     foreach ($fields as $f) {
         if (!isset($_POST[$f])) continue;
         $val = sanitize_text_field($_POST[$f]);
-        if (in_array($f, ['lat','lon'])) {
-            $val = nakama_sanitize_float($val);
+        $val = nakama_sanitize_float($val);
+        if ($val === null) {
+            delete_post_meta($post_id, $f);
+            continue;
         }
         update_post_meta($post_id, $f, $val);
+    }
+
+    if (isset($_POST['image'])) {
+        $image = sanitize_text_field($_POST['image']);
+        update_post_meta($post_id, 'image', $image);
     }
 
     // Requirements & rewards arrays
@@ -432,6 +437,7 @@ function nakama_save_event($post_id) {
     } else {
         delete_post_meta($post_id, 'expire_at');
     }
+    return;
 }
 
 add_action('admin_notices', function() {
@@ -474,18 +480,39 @@ function nakama_save_quiz($post_id) {
         $answer = sanitize_text_field($_POST['correct']);
         update_post_meta($post_id, 'answer', $answer);
     }
+    return;
 }
 
 function nakama_save_card($post_id) {
-    $fields = ['front_image','back_image','group_card'];
+    $fields = ['front_image','back_image'];
     foreach ($fields as $f) {
-        if (!isset($_POST[$f])) continue;
-        $val = ($f === 'group_card') ? (bool)$_POST[$f] : sanitize_text_field($_POST[$f]);
-        update_post_meta($post_id, $f, $val);
+        if (isset($_POST[$f])) {
+            update_post_meta($post_id, $f, sanitize_text_field($_POST[$f]));
+        }
     }
+    update_post_meta($post_id, 'group_card', isset($_POST['group_card']));
+    return;
 }
 
-// Register how media appears in REST (URLs)
+function nakama_save_item($post_id){
+    $fields = ['image_2d', 'image_3d'];
+    foreach ($fields as $f) {
+        if (isset($_POST[$f])) {
+            update_post_meta($post_id, $f, sanitize_text_field($_POST[$f]));
+        }
+    }
+    return;
+}
+
+function nakama_save_asset2d($post_id){
+    if (isset($_POST['image'])) {
+        $image = sanitize_text_field($_POST['image']);
+        update_post_meta($post_id, 'image', $image);
+    }
+    return;
+}
+
+// Registers how media appears in REST (URLs)
 add_action('rest_api_init', function () {
     //Exposing event fields
     register_rest_field('event', 'requirements', [
