@@ -98,7 +98,7 @@ function initLeaflet(mapDivId, lat = centerLat, lon = centerLon) {
     maxZoom: 19,   // highest zoom supported by the tile server
   }).addTo(map);
   currentMap = map;
-  myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b><br>Group: ${myGroup || 'None'}`);
+  myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b><br>Group: ${myGroup.name || 'None'}`);
   createPlayerLabel(session.user_id, session.username, myGroup, lat, lon);
 
   const latitudes = mapBounds.map(p => p[0]);
@@ -269,7 +269,6 @@ function drawCellBorder(cellKeyStr) {
 
 // Remove markers from irrelevant cells
 function cleanupCells(newRelevant) {
-  console.log("Cleaning up cells. Current relevant:", relevantCells, "\nNew relevant:", newRelevant);
   for (const cell of relevantCells) {
     if (!newRelevant.has(cell)) {
       const set = cellPlayers.get(cell);
@@ -306,12 +305,12 @@ function setupStreamHandlers() {
     console.log("Received presence event for stream", streampresence);
     if(streampresence.joins){
       streampresence.joins.forEach((join) => {
-        console.log("New user joined: %o", join.user_id);
+        console.log("New user joined: %o", join.username);
       });
     }
     if(streampresence.leaves){
       streampresence.leaves.forEach((leave) => {
-        console.log("User left: %o", leave.user_id);
+        console.log("User left: %o", leave.username);
         if (leave.user_id !== session.user_id) removePlayerMarker(leave.user_id);
       });
     }
@@ -525,15 +524,15 @@ export async function initMap(mapDivId) {
   if (!matchID) return;
   await socket.joinMatch(matchID);
 
-  const map = initLeaflet(mapDivId);
-  const events = await fetchEvents();
-  addEventsToMap(map, events);
-
   const account = await client.getAccount(session);
   const metadata = typeof account.user.metadata === "string"
     ? JSON.parse(account.user.metadata)
     : account.user.metadata;
   myGroup = metadata?.group;
+
+  const map = initLeaflet(mapDivId);
+  const events = await fetchEvents();
+  addEventsToMap(map, events);
 
   setupStreamHandlers();
   startPositionUpdates();

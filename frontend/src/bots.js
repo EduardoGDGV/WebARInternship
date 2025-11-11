@@ -24,74 +24,82 @@ async function createBot(i) {
   const password = "botpassword";
   const username = `bot${i}`;
 
+  var session = null;
+  try{
+    session = await client.authenticateEmail(email, password, true, username);
+  }catch (err) {
+    console.log("Authentication Error:", err);
+    return;
+  }
+  const socket = client.createSocket();
+  let socketClosed = false;
+
   try {
-    const session = await client.authenticateEmail(email, password, true, username);
-    const socket = client.createSocket();
-    let socketClosed = false;
+    if(!session) return;
+    await socket.connect(session, false);
+    await sleep(400);
+    console.log(`Bot ${i} connected`);
+  } catch (e) {
+    console.warn(`Bot ${i} connection attempt failed`, e);
+    return
+  }
 
-    // Handle socket errors safely
-    socket.onerror = (err) => {
-      if (socketClosed) return;
+  // Handle socket errors safely
+  socket.onerror = (err) => {
+    if (socketClosed) return;
+    socketClosed = true;
+    console.error(`Bot ${i} socket error:`, err);
+    setTimeout(() => {
+      try { socket.disconnect(); } catch {
+        return;
+      }
+    }, 100);
+  };
+
+  socket.onclose = () => {
+    socketClosed = true;
+  };
+
+  // Initial random position
+  let lat = -23.55574 + (Math.random() - 0.5) * 0.002;
+  let lon = -46.72980 + (Math.random() - 0.5) * 0.002;
+  let matchID = null;
+  if (!socket) return;
+  try {
+    const res = await socket.rpc("get_match");
+    if (!res) return;
+    matchID = res.payload;
+    console.log(`Bot ${i} joining match:`, matchID);
+    if (!matchID) return;
+    await socket.joinMatch(matchID);
+  } catch (e) {
+    console.error(`Bot ${i} failed joining match:`, e);
+    return;
+  }
+
+  async function botLoop() {
+    // If websocket is not OPEN, stop
+    if (!socket || socketClosed || cleaningUp) {
       socketClosed = true;
-      console.error(`Bot ${i} socket error:`, err);
-      setTimeout(() => {
-        try { socket.close(); } catch {
-          return;
-        }
-      }, 100);
-    };
-
-    socket.onclose = () => {
-      socketClosed = true;
-    };
-
-    try {
-      await socket.connect(session, true);
-      await sleep(400);
-      console.log(`Bot ${i} connected`);
-    } catch (e) {
-      console.warn(`Bot ${i} connection attempt failed`, e);
-    }
-
-    // Initial random position
-    let lat = -23.55574 + (Math.random() - 0.5) * 0.002;
-    let lon = -46.72980 + (Math.random() - 0.5) * 0.002;
-    let matchID = null;
-    if (!socket) return;
-    try {
-      const res = await socket.rpc("get_match");
-      if (!res) return;
-      matchID = res.payload;
-      console.log(`Bot ${i} joining match:`, matchID);
-      if (!matchID) return;
-      await socket.joinMatch(matchID);
-    } catch (e) {
-      console.error(`Bot ${i} failed joining match:`, e);
       return;
     }
 
-    async function botLoop() {
-      // Random walk
-      lat += (Math.random() - 0.5) * 0.0002;
-      lon += (Math.random() - 0.5) * 0.0002;
+    // Random walk
+    lat += (Math.random() - 0.5) * 0.0002;
+    lon += (Math.random() - 0.5) * 0.0002;
 
-      if (cleaningUp || socketClosed) return;
-      try {
-        var opCode = 1;
-        socket.sendMatchState(matchID, opCode, JSON.stringify({ lat, lon }));
-      } catch (e) {
-        console.error(`Bot ${i} failed sending position:`, e);
-      }
-
-      if (!cleaningUp && !socketClosed) setTimeout(botLoop, 1000);
+    try {
+      var opCode = 1;
+      socket.sendMatchState(matchID, opCode, JSON.stringify({ lat, lon }));
+    } catch (e) {
+      console.error(`Bot ${i} failed sending position:`, e);
     }
 
-    botLoop();
-    bots.push({ session, socket });
-
-  } catch (e) {
-    console.error(`Bot ${i} failed:`, e);
+    if (!cleaningUp && !socketClosed) setTimeout(botLoop, 1000);
   }
+
+  botLoop();
+  bots.push({ session, socket });
 }
 
 // Spawn bots in batches with concurrency control
@@ -120,7 +128,11 @@ async function cleanupBots() {
   cleaningUp = true;
   console.log("Cleaning up bots...");
   for (const b of bots) {
-    try { b.socket.close(); } catch {}
+    try {
+      if(b.socket) b.socket.disconnect();
+    } catch {
+      console.log("Failed to disconnect socket.");
+    }
     // Delete the bot account using its session
     if (b.session) {
       try {

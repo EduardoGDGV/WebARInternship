@@ -2,7 +2,6 @@ package main
 
 import (
 	//"bytes"
-	"context"
 	//"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -33,7 +32,7 @@ func cellKey(lat, lon float64) string {
 	return fmt.Sprintf("%.5f,%.5f", lat, lon)
 }
 
-func getCell(lat, lon float64) (float64 , float64) {
+func getCell(lat, lon float64) (float64, float64) {
 	return float64(math.Floor(float64(lat/CELL_SIZE)) * float64(CELL_SIZE)),
 		float64(math.Floor(float64(lon/CELL_SIZE)) * float64(CELL_SIZE))
 }
@@ -62,24 +61,6 @@ func determineCells(lat, lon float64) []string {
 		keys = append(keys, cellKey(baseLat+(math.Copysign(CELL_SIZE, offsetLat)), baseLon+(math.Copysign(CELL_SIZE, offsetLon))))
 	}
 	return keys
-}
-
-func getUserGroup(ctx context.Context, nk runtime.NakamaModule, userID string) string {
-	if g, ok := userGroups[userID]; ok {
-		return g
-	}
-
-	// Fetch first group user belongs to
-	groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
-	if err == nil && len(groups) > 0 {
-		group := groups[0].Group.Name
-		userGroups[userID] = group
-		return group
-	}else{
-		fmt.Println("Error fetching user groups for user ", userID, ": ", err)
-	}
-
-	return ""
 }
 
 // Core Update Function
