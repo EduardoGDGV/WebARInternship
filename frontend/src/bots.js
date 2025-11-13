@@ -66,9 +66,9 @@ async function createBot(i) {
   let matchID = null;
   if (!socket) return;
   try {
-    const res = await socket.rpc("get_match");
+    const res = await socket.rpc("join_global_match");
     if (!res) return;
-    matchID = res.payload;
+    matchID = JSON.parse(res.payload).match_id;
     console.log(`Bot ${i} joining match:`, matchID);
     if (!matchID) return;
     await socket.joinMatch(matchID);
