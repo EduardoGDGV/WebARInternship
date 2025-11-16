@@ -26,6 +26,11 @@ const (
 	AdminID         = "5c6f4519-0ba6-4fd2-b26d-f3639c3bf1e3"
 )
 
+var (
+	// globalMatchID holds the ID of the pre-created global match
+	globalMatchID string
+)
+
 // GroupManager
 type GroupInfo struct {
 	ID      string
@@ -245,6 +250,17 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	if err := initializer.RegisterMatch("global_match", NewGlobalMatch); err != nil {
 		return err
 	}
+	// Create the global match once
+    id, err := nk.MatchCreate(ctx, "global_match", map[string]interface{}{
+        "is_global": true,
+    })
+    if err != nil {
+        logger.Error("Failed to create global match at startup: ", err)
+        return err
+    }
+
+    globalMatchID = id
+    logger.Info("Global match pre-created with ID: ", globalMatchID)
 
 	if err := initializer.RegisterRpc("join_global_match", rpcJoinGlobalMatch); err != nil {
 		return err

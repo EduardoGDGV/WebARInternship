@@ -85,8 +85,8 @@ async function createBot(i) {
     }
 
     // Random walk
-    lat += (Math.random() - 0.5) * 0.0002;
-    lon += (Math.random() - 0.5) * 0.0002;
+    lat += (Math.random() - 0.5) * 0.00005;
+    lon += (Math.random() - 0.5) * 0.00005;
 
     try {
       var opCode = 1;
@@ -154,6 +154,6 @@ process.on("SIGINT", cleanupBots);
 // Start
 (async () => {
   await spawnBots();
-  // Auto-cleanup after 80s
-  setTimeout(cleanupBots, 80000);
+  // Auto-cleanup after 800s
+  setTimeout(cleanupBots, 800000);
 })();
