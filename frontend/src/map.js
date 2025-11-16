@@ -23,16 +23,23 @@ let session = null;
 let socket = null;
 let matchID = null;
 
+// map + markers state
 let myMarker = null;
-let myGroup = null;
+let myGroup = { id: null, name: null };
 let playerMarkers = new Map(); // userId -> marker
 let playerLabels = new Map();  // userId -> label (divIcon)
-let cellPlayers = new Map();   // cellKey -> Set(userId)
-let playerCell = new Map();    // userId -> physical cellKey
-let relevantCells = new Set(); // current + neighbor cells
+let players = new Map();       // userId -> { username, groupId }
+let groups = new Map();        // groupId -> { groupname }
 let eventMarkers = [];
+let currentMap = null;
 
-// Icons
+// settings
+const centerLat = -23.55574;
+const centerLon = -46.72980;
+const FOV = 50;
+const TEXT_DECODER = new TextDecoder();
+
+// icons
 const redIcon = new L.Icon({
   iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
   iconAnchor: [12, 41]
@@ -46,11 +53,6 @@ const playerIcon = new L.Icon({
   iconAnchor: [12, 41]
 });
 
-const CELL_SIZE = 0.0004;
-const centerLat = -23.55574;
-const centerLon = -46.72980;
-let currentMap = null;
-
 const mapBounds = [
   [-23.557045162755653, -46.73422584856919],
   [-23.55147505044313, -46.73130018212596],
@@ -58,36 +60,10 @@ const mapBounds = [
   [-23.55966804391334, -46.72839059081891]
 ]
 
-function cellKey(lat, lon) {
-  return `${parseFloat(lat).toFixed(5)},${parseFloat(lon).toFixed(5)}`;
-}
-
-function getCell(lat, lon) {
-  const baseLat = Math.floor(lat / CELL_SIZE) * CELL_SIZE;
-  const baseLon = Math.floor(lon / CELL_SIZE) * CELL_SIZE;
-  return [baseLat, baseLon];
-}
-
-function determineCells(lat, lon) {
-  const [baseLat, baseLon] = getCell(lat, lon);
-  // center of current cell
-  const centerLat = baseLat + CELL_SIZE / 2;
-  const centerLon = baseLon + CELL_SIZE / 2;
-  const offsetLat = lat - centerLat;
-  const offsetLon = lon - centerLon;
-  const keys = [cellKey(baseLat, baseLon)];
-
-  if (offsetLat > 0) keys.push(cellKey(baseLat + CELL_SIZE, baseLon));
-  else if (offsetLat < 0) keys.push(cellKey(baseLat - CELL_SIZE, baseLon));
-  if (offsetLon > 0) keys.push(cellKey(baseLat, baseLon + CELL_SIZE));
-  else if (offsetLon < 0) keys.push(cellKey(baseLat, baseLon - CELL_SIZE));
-  if (offsetLat != 0 && offsetLon != 0) {
-    keys.push(cellKey(
-      baseLat + Math.sign(offsetLat) * CELL_SIZE,
-      baseLon + Math.sign(offsetLon) * CELL_SIZE
-    ));
-  }
-  return keys;
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const dLat = lat1 - lat2;
+  const dLon = lon1 - lon2;
+  return Math.sqrt(dLat * dLat + dLon * dLon) * 111000; // approximate meters
 }
 
 // Leaflet Map
@@ -204,11 +180,11 @@ function createPlayerLabel(userId, username, group, lat, lon) {
 }
 
 // Player Markers
-function updatePlayerMarker(userId, username, lat, lon, group) {
+function updatePlayerMarker(userId, username, lat, lon, groupId) {
   if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
 
   const isSelf = userId === session.user_id;
-  const icon = isSelf ? playerIcon : (group === myGroup?.name ? blueIcon : redIcon);
+  const icon = isSelf ? playerIcon : (groupId === myGroup?.id ? blueIcon : redIcon);
   
   let marker = playerMarkers.get(userId);
   if (playerMarkers.has(userId)) {
@@ -216,7 +192,7 @@ function updatePlayerMarker(userId, username, lat, lon, group) {
   } else {
     marker = L.marker([lat, lon], { icon })
       .addTo(currentMap)
-      .bindPopup(`<b>${username}</b><br>Group: ${group || 'None'}`);
+      .bindPopup(`<b>${username}</b><br>Group: ${groups[groupId].groupname || 'None'}`);
     playerMarkers.set(userId, marker);
   }
 
@@ -224,7 +200,7 @@ function updatePlayerMarker(userId, username, lat, lon, group) {
   if (playerLabels.has(userId)) {
     playerLabels.get(userId).setLatLng([lat, lon]);
   } else {
-    createPlayerLabel(userId, username, group, lat, lon);
+    createPlayerLabel(userId, username, groups[groupId].groupname, lat, lon);
   }
 }
 
@@ -240,142 +216,109 @@ function removePlayerMarker(userId) {
     currentMap.removeLayer(label);
     playerLabels.delete(userId);
   }
-
-  const cell = playerCell.get(userId);
-  if (cell) {
-    const set = cellPlayers.get(cell);
-    if (set) set.delete(userId);
-    if (set && set.size === 0) cellPlayers.delete(cell);
-    playerCell.delete(userId);
-  }
 }
 
-let cellOverlays = new Map(); // cellKey -> rectangle layer
-function drawCellBorder(cellKeyStr) {
-  const [lat, lon] = cellKeyStr.split(",").map(parseFloat);
-  const bounds = [
-    [lat, lon],
-    [lat + CELL_SIZE, lon + CELL_SIZE]
-  ];
+// Prune markers farther than FOV from my current marker
+function cleanupMarkers() {
+  if (!myMarker) return;
+  const myLatLng = myMarker.getLatLng();
+  const myLat = myLatLng.lat;
+  const myLon = myLatLng.lng;
 
-  const rectangle = L.rectangle(bounds, {
-    color: "#00ff00",
-    weight: 1,
-    fillOpacity: 0.05
-  }).addTo(currentMap);
-
-  cellOverlays.set(cellKeyStr, rectangle);
-}
-
-// Remove markers from irrelevant cells
-function cleanupCells(newRelevant) {
-  for (const cell of relevantCells) {
-    if (!newRelevant.has(cell)) {
-      const set = cellPlayers.get(cell);
-      if (set) {
-        for (const userId of set){
-          if (playerMarkers.get(userId)?.options.icon == blueIcon || userId == session.user_id) continue;
-          removePlayerMarker(userId);
-        }
-      }
-      cellPlayers.delete(cell);
-
-      // Remove cell rectangle
-      const rect = cellOverlays.get(cell);
-      if (rect) {
-        currentMap.removeLayer(rect);
-        cellOverlays.delete(cell);
+  for (const [userId, p] of players.entries()) {
+    if (userId === session.user_id) continue;
+    if (p.lat == null || p.lon == null) continue;
+    const d = distanceMeters(myLat, myLon, p.lat, p.lon);
+    if (d > FOV) {
+      // remove if we have a marker for them
+      removePlayer(userId);
+    } else {
+      // if they are within range and we lack a marker, create it
+      if (!playerMarkers.has(userId)) {
+        updatePlayerMarker(userId, p.username, p.lat, p.lon, p.groupId);
       }
     }
   }
-
-  // Draw new cell borders
-  for (const cell of newRelevant) {
-    if (!cellOverlays.has(cell)) {
-      drawCellBorder(cell);
-    }
-  }
-
-  relevantCells = newRelevant;
 }
 
-// Stream Handlers
-function setupStreamHandlers() {
-  socket.onstreampresence = (streampresence) => {
-    console.log("Received presence event for stream", streampresence);
-    if(streampresence.joins){
-      streampresence.joins.forEach((join) => {
-        console.log("New user joined: %o", join.username);
-      });
-    }
-    if(streampresence.leaves){
-      streampresence.leaves.forEach((leave) => {
-        console.log("User left: %o", leave.username);
+// Match Handlers
+function setupSocketHandlers() {
+  // get players joining/leaving the match
+  socket.onmatchpresence = (matchpresence) => {
+    console.log("Match presence:", matchpresence);
+    
+    if (matchpresence.leaves) {
+      matchpresence.leaves.forEach(leave => {
         if (leave.user_id !== session.user_id) removePlayerMarker(leave.user_id);
       });
     }
-  }
+  };
 
-  socket.onstreamdata = async (stream) => {
-    console.log("Received stream data:", stream);
-    try {
-      const { UserID, Pos } = JSON.parse(stream.data);
-      if (!UserID || !Pos || UserID === session.user_id) return;
-
-      const users = await client.getUsers(session, UserID);
-      if (!users || !users.users || users.users.length === 0) return;
-      const User = users.users[0];
-      const Metadata = User.metadata;
-      const Group = Metadata.group || null;
-
-      const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
-      const newCell = cellKey(cLat, cLon);
-
-      if (!relevantCells.has(newCell) && Group.name && Group.name != myGroup.name) return;
-
-      if (!cellPlayers.has(newCell)) cellPlayers.set(newCell, new Set());
-      cellPlayers.get(newCell).add(UserID);
-      playerCell.set(UserID, newCell);
-
-      updatePlayerMarker(UserID, User.username, Pos.lat, Pos.lon, Group.name? Group.name : null);
-    } catch (err) {
-      console.error("Failed handling stream data:", err);
-    }
-  }
-
-  socket.onmatchdata = async (matchData) => {
+  // get match data
+  socket.onmatchdata = (matchData) => {
     try {
       const opCode = matchData.op_code;
-      const data = JSON.parse(new TextDecoder().decode(matchData.data));
+      const data = JSON.parse(TEXT_DECODER.decode(matchData.data));
 
-      console.log("Decoded match data:", data);
-      const UserID = data.user_id;
-      const Pos = { lat: data.lat, lon: data.lon };
-      // handle position updates
-      if (opCode === 1) {
-        if (!UserID || !Pos || UserID === session.user_id) return;
-        const users = await client.getUsers(session, UserID);
-        if (!users || !users.users || users.users.length === 0) return;
-        const User = users.users[0];
-        const Metadata = User.metadata;
-        const Group = Metadata.group || null;
+      if (opCode === 10) {
+        // add/update cache for each user in payload
+        data.forEach(user => {
+          const userId = user.user_id;
+          const record = {
+            username: user.username,
+            groupId: user.group_id,
+          };
+          players.set(userId, record);
+          if (user.group_id && !groups.has(user.group_id)) {
+            groups.set(user.group_id, { groupname: user.group_name });
+          }
 
-        const [cLat, cLon] = getCell(Pos.lat, Pos.lon);
-        const newCell = cellKey(cLat, cLon);
+          // if the payload includes the current user, update our local group info
+          if (userId === session.user_id) {
+            myGroup.id = user.group_id;
+            myGroup.name = user.group_name;
+            // update our marker popup if present
+            if (myMarker) myMarker.bindPopup(`<b>You</b><br>Group: ${myGroup.name || 'None'}`);
+          }
+        });
 
-        if (!relevantCells.has(newCell) && Group.name && Group.name != myGroup.name) return;
-
-        if (!cellPlayers.has(newCell)) cellPlayers.set(newCell, new Set());
-        cellPlayers.get(newCell).add(UserID);
-        playerCell.set(UserID, newCell);
-
-        updatePlayerMarker(UserID, User.username, Pos.lat, Pos.lon, Group.name? Group.name : null);
+        // create markers only for nearby ones players
+        cleanupMarkers();
+        return;
       }
 
+      if (opCode === 1) {
+        // batched position updates
+        data.forEach(update => {
+          // position update { user_id, lat, lon }
+          const userId = update.user_id;
+          if (userId === session.user_id) return; // ignore own echo
+          const pos = { lat: update.lat, lon: update.lon };
+          const player = players.get(userId) || { username: null, groupId: null };
+          players.set(userId, player);
+
+          // if they're within FOV, create/update a marker, otherwise remove if exists
+          if (myMarker) {
+            const myPos = myMarker.getLatLng();
+            const d = distanceMeters(myPos.lat, myPos.lng, pos.lat, pos.lon);
+            if (d <= FOV) {
+              updatePlayerMarker(userId, player.username, pos.lat, pos.lon, player.groupId);
+            } else {
+              // remove marker if far
+              if (playerMarkers.has(userId)) removePlayerMarker(userId);
+            }
+          } else {
+            // if we don't know our location yet, create marker to be pruned later
+            updatePlayerMarker(userId, player.username, pos.lat, pos.lon, player.groupId);
+          }
+        });
+        return;
+      }
+      // ignore other opCodes
     } catch (err) {
       console.error("Error decoding match data:", err);
     }
-  }
+  };
 
   socket.onnotification = (notification) => {
     const payload = notification.content?.data;
@@ -404,10 +347,11 @@ function setupStreamHandlers() {
   }
 }
 
+/*
 let lastUpdateTime = 0;
 const UPDATE_INTERVAL = 1000; // ms
 
-/*function startPositionUpdates() {
+function startPositionUpdates() {
   if (!("geolocation" in navigator)) {
     alert("Geolocation is not supported by your browser.");
     return;
@@ -481,7 +425,7 @@ function startPositionUpdates() {
 
     if(circle) currentMap.removeLayer(circle);
     circle = L.circle([lat, lon], {
-      radius: 20, // meters
+      radius: 50, // meters
       color: 'blue',        // outline color
       fillColor: '#30f',    // fill color
       fillOpacity: 0.2,     // transparency
@@ -490,19 +434,8 @@ function startPositionUpdates() {
     // Update label position
     playerLabels.get(session.user_id)?.setLatLng([lat, lon]);
 
-    // keep cells in sync
-    const newRelevant = new Set(determineCells(lat, lon));
-    cleanupCells(newRelevant);
-
-    const [cLat, cLon] = getCell(lat, lon);
-    const physicalCell = cellKey(cLat, cLon);
-    playerCell.set(session.user_id, physicalCell);
-    if (!cellPlayers.has(physicalCell)) cellPlayers.set(physicalCell, new Set());
-    cellPlayers.get(physicalCell).add(session.user_id);
-
     try {
       const payload = { lat, lon };
-      //await socket.rpc("update_position", JSON.stringify(payload));
       var opCode = 1;
       socket.sendMatchState(matchID, opCode, JSON.stringify(payload));
     } catch (e) {
@@ -524,16 +457,10 @@ export async function initMap(mapDivId) {
   if (!matchID) return;
   await socket.joinMatch(matchID);
 
-  const account = await client.getAccount(session);
-  const metadata = typeof account.user.metadata === "string"
-    ? JSON.parse(account.user.metadata)
-    : account.user.metadata;
-  myGroup = metadata?.group;
-
   const map = initLeaflet(mapDivId);
   const events = await fetchEvents();
   addEventsToMap(map, events);
 
-  setupStreamHandlers();
+  setupSocketHandlers();
   startPositionUpdates();
 }

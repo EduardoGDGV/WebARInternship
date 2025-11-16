@@ -201,16 +201,16 @@ func (gm *GroupManager) RemoveUser(ctx context.Context, userID string) error {
 	return nil
 }
 
-// GetUserGroupName returns the cached group name for a user (if any)
-func (gm *GroupManager) GetUserGroupName(nk runtime.NakamaModule, ctx context.Context, userID string) (string, bool) {
+// GetUserGroup returns the cached group name and index for a user (if any)
+func (gm *GroupManager) GetUserGroup(nk runtime.NakamaModule, ctx context.Context, userID string) (string, string, bool) {
 	if idx, ok := gm.userToGroup[userID]; ok && idx < len(gm.groups) {
-		return gm.groups[idx].Name, true
+		return gm.groups[idx].ID, gm.groups[idx].Name, true
 	}
 
 	// Fallback query Nakama (in case cache missed it)
 	groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	if len(groups) != 0 {
 		group := groups[0].GetGroup()
@@ -224,9 +224,9 @@ func (gm *GroupManager) GetUserGroupName(nk runtime.NakamaModule, ctx context.Co
 			}
 		}
 		gm.mu.Unlock()
-		return group.Name, true
+		return group.Id, group.Name, true
 	}
-	return "", false
+	return "", "", false
 }
 
 // Initialize global group manager
@@ -234,7 +234,7 @@ var groupManager *GroupManager
 
 func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID string, logger runtime.Logger) {
 	// If user already has a group no need to assign
-	if _, ok := groupManager.GetUserGroupName(nk, ctx, userID); ok {
+	if _, _, ok := groupManager.GetUserGroup(nk, ctx, userID); ok {
 		return
 	}
 	// assign via GroupManager (call GroupUsersAdd and update cache)

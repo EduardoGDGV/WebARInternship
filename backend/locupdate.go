@@ -67,9 +67,11 @@ type GlobalMatch struct{}
 
 type Player struct {
 	ID         string
-	GroupID    string
-	Presence   runtime.Presence
+	Username   string
+	GroupID    int
+	GroupName  string
 	Position   Position
+	Presence   runtime.Presence
 	lastUpdate int64 // unix ms
 	// other fields (lastBroadcastTime, etc) to be added
 }
@@ -107,24 +109,70 @@ func (m *GlobalMatch) MatchJoinAttempt(ctx context.Context, logger runtime.Logge
 	return state, true, ""
 }
 
+// Data map sent to clients about joining/connected players
+type UserData struct {
+	UserID    string `json:"user_id"`
+	Username  string `json:"username"`
+	GroupID   int    `json:"group_id"`
+	GroupName string `json:"group_name"`
+}
+
 func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
 	s := state.(*MatchState)
+
+	existing := make([]UserData, 0, len(s.Players))
+	for _, pl := range s.Players {
+		// Build list of existing players
+		existing = append(existing, UserData{
+			UserID:    pl.ID,
+			Username:  pl.Username,
+			GroupID:   pl.GroupID,
+			GroupName: pl.GroupName,
+		})
+	}
+
+	joins := make([]UserData, 0, len(presences))
 	for _, p := range presences {
 		userID := p.GetUserId()
-		groupName, ok := groupManager.GetUserGroupName(nk, ctx, userID)
-		if !ok {
-			logger.Warn("User %s has no group assigned", userID)
+
+		// prevent accidental duplicates
+		if _, exists := s.Players[userID]; exists {
+			logger.Warn("Ignoring duplicate join for user: " + userID)
 			continue
 		}
+
+		username := p.GetUsername()
+		groupID := groupManager.userToGroup[userID]
+		groupName := groupManager.groups[groupID].Name
 		s.Players[userID] = &Player{
 			ID:         userID,
-			GroupID:    groupName,
-			Presence:   p,
+			Username:   username,
+			GroupID:    groupID,
+			GroupName:  groupName,
 			Position:   Position{Lat: 0, Lon: 0}, // not known yet
+			Presence:   p,
 			lastUpdate: 0,
 		}
+		joins = append(joins, UserData{
+			UserID:    userID,
+			Username:  username,
+			GroupID:   groupID,
+			GroupName: groupName,
+		})
 		// no cell assigned until first valid position update
 		logger.Info(fmt.Sprintf("%s joined.", p.GetUsername()))
+	}
+
+	// notify joining players of existing players
+	if len(existing) > 0 {
+		payload, _ := json.Marshal(existing)
+		dispatcher.BroadcastMessage(10, payload, presences, nil, false)
+	}
+
+	// notify existing players of joining players
+	if len(joins) > 0 {
+		payload, _ := json.Marshal(joins)
+		dispatcher.BroadcastMessage(10, payload, nil, nil, false)
 	}
 	return s
 }
@@ -225,10 +273,9 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 
 	// local types and buffers
 	type update struct {
-		UserID  string  `json:"user_id"`
-		Lat     float64 `json:"lat"`
-		Lon     float64 `json:"lon"`
-		GroupID string  `json:"group_id"`
+		UserID string  `json:"user_id"`
+		Lat    float64 `json:"lat"`
+		Lon    float64 `json:"lon"`
 	}
 	// per-cell aggregated updates: latIdx -> lonIdx -> []update
 	cellUpdates := make(map[int]map[int][]update)
@@ -284,9 +331,8 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		// Move player between nested cell maps
 		s.movePlayer(userID, player)
 		latIdx, lonIdx := cellIndices(newPos.Lat, newPos.Lon)
-		// append to group updates
-		up := update{UserID: userID, Lat: newPos.Lat, Lon: newPos.Lon, GroupID: player.GroupID}
 		// append to cell updates
+		up := update{UserID: userID, Lat: newPos.Lat, Lon: newPos.Lon}
 		if _, ok := cellUpdates[latIdx]; !ok {
 			cellUpdates[latIdx] = make(map[int][]update)
 		}
