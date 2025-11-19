@@ -36,7 +36,7 @@ let currentMap = null;
 // settings
 const centerLat = -23.55574;
 const centerLon = -46.72980;
-const FOV = 50;
+const FOV = 30;
 const TEXT_DECODER = new TextDecoder();
 
 const mapBounds = [
@@ -224,9 +224,9 @@ function cleanupMarkers() {
     if (userId === session.user_id) continue;
     if (p.lat == null || p.lon == null) continue;
     const d = distanceMeters(myLat, myLon, p.lat, p.lon);
-    if (d > FOV) {
+    if (d > FOV || (p.groupId && p.groupId === myGroup.id)) {
       // remove if we have a marker for them
-      removePlayer(userId);
+      removePlayerMarker(userId);
     } else {
       // if they are within range and we lack a marker, create it
       if (!playerMarkers.has(userId)) {
@@ -278,7 +278,7 @@ function setupSocketHandlers() {
           }
         });
 
-        // create markers only for nearby ones players
+        // create markers only for nearby and group players
         cleanupMarkers();
         return;
       }
@@ -288,10 +288,11 @@ function setupSocketHandlers() {
         data.forEach(update => {
           // position update { user_id, lat, lon }
           const userId = update.user_id;
-          if (!players.has(userId)) return; // unknown player, wait for join info
           if (userId === session.user_id) return; // ignore own echo
-          const pos = { lat: update.lat, lon: update.lon };
+          if (!players.has(userId)) return; // unknown player, wait for join info
           const player = players.get(userId);
+          if (player.groupId === myGroup.id) return; // from group, fetch through group data (op_code 2)
+          const pos = { lat: update.lat, lon: update.lon };
 
           // if they're within FOV, create/update a marker, otherwise remove if exists
           if (myMarker) {
@@ -310,6 +311,22 @@ function setupSocketHandlers() {
         });
         return;
       }
+
+      if (opCode === 2) {
+        // batched group updates
+        data.forEach(update => {
+          // position update { user_id, lat, lon }
+          const userId = update.user_id;
+          if (userId === session.user_id) return; // ignore own echo
+          if (!players.has(userId)) return; // unknown player, wait for join info
+          const player = players.get(userId);
+          const pos = { lat: update.lat, lon: update.lon };
+          // group players are always shown
+          updatePlayerMarker(userId, "GROUP " + player.username, pos.lat, pos.lon, player.groupId);
+        });
+        return;
+      }
+
       // ignore other opCodes
     } catch (err) {
       console.error("Error decoding match data:", err);
@@ -421,7 +438,7 @@ function startPositionUpdates() {
 
     if(circle) currentMap.removeLayer(circle);
     circle = L.circle([lat, lon], {
-      radius: 50, // meters
+      radius: FOV, // meters
       color: 'blue',        // outline color
       fillColor: '#30f',    // fill color
       fillOpacity: 0.2,     // transparency

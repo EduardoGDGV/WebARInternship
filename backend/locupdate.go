@@ -16,8 +16,8 @@ type Position struct {
 	Lon float64 `json:"lon"`
 }
 
-// Each stream cell covers ~40 meters
-const CELL_SIZE float64 = 0.0004
+// Each stream cell covers ~20 meters
+const CELL_SIZE float64 = 0.0002
 
 // Campus polygon bounds
 var mapBounds = [][2]float64{
@@ -279,6 +279,8 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 	}
 	// per-cell aggregated updates: latIdx -> lonIdx -> []update
 	cellUpdates := make(map[int]map[int][]update)
+	// per-group aggregated updates: group_id -> []update
+	groupUpdates := make(map[int][]update)
 
 	// Process incoming messages and populate buffers and spatial index
 	for _, msg := range messages {
@@ -298,30 +300,25 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 			continue
 		}
 
-		// Basic sanity checks
-		if newPos.Lat < -90 || newPos.Lat > 90 || newPos.Lon < -180 || newPos.Lon > 180 {
-			logger.Warn(fmt.Sprintf("Out-of-bounds pos from %s: %+v", userID, newPos))
-			continue
-		}
-		// Movement sanity
+		// Validation checks
 		if player.Position.Lat != 0 || player.Position.Lon != 0 {
 			prev := player.Position
-			if tick-player.lastUpdate < 999 {
+			if tick-player.lastUpdate < 20 {
 				continue // skip if last update was less than 1 second ago
 			}
 			dist := distanceMeters(prev, newPos)
 			if dist > 30 {
-				logger.Warn(fmt.Sprintf("Invalid movement from %s: prev=%+v new=%+v dist=%.1fm", userID, prev, newPos, dist))
+				logger.Info(fmt.Sprintf("Invalid movement from %s: prev=%+v new=%+v dist=%.1fm", userID, prev, newPos, dist))
 				continue
 			}
-			if dist < 1 {
+			if dist < 0.2 {
 				// skip negligible movement
 				continue
 			}
 		}
 		// Campus bounds check
 		if !pointInPolygon(newPos.Lat, newPos.Lon, mapBounds) {
-			logger.Warn(fmt.Sprintf("Pos outside campus from %s: %+v", userID, newPos))
+			logger.Info(fmt.Sprintf("Pos outside campus from %s: %+v", userID, newPos))
 			continue
 		}
 
@@ -336,7 +333,12 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		if _, ok := cellUpdates[latIdx]; !ok {
 			cellUpdates[latIdx] = make(map[int][]update)
 		}
+		groupId := player.GroupID
+		if _, ok := groupUpdates[groupId]; !ok {
+			groupUpdates[groupId] = make([]update, 0)
+		}
 		cellUpdates[latIdx][lonIdx] = append(cellUpdates[latIdx][lonIdx], up)
+		groupUpdates[groupId] = append(groupUpdates[groupId], up)
 	}
 
 	// Broadcast proximity updates cell-by-cell
@@ -369,6 +371,26 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 				// Broadcast to players of that neighbor cell
 				dispatcher.BroadcastMessage(1, payload, presences, nil, false)
 			}
+		}
+	}
+
+	for groupID, updates := range groupUpdates {
+		payload, err := json.Marshal(updates)
+		if err != nil {
+			logger.Warn("Marshal cell update failed: " + err.Error())
+			continue
+		}
+		groupMembers := groupManager.groups[groupID].Members
+
+		// Build slice of presences
+		presences := make([]runtime.Presence, 0, len(groupMembers))
+		for memberID := range groupMembers {
+			if pl, ok := s.Players[memberID]; ok {
+				presences = append(presences, pl.Presence)
+			}
+		}
+		if len(presences) > 0 {
+			dispatcher.BroadcastMessage(2, payload, presences, nil, false)
 		}
 	}
 	return s
