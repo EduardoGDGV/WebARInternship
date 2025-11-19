@@ -68,7 +68,7 @@ async function createBot(i) {
   try {
     const res = await socket.rpc("join_global_match");
     if (!res) return;
-    matchID = JSON.parse(res.payload).match_id;
+    matchID = res.payload;
     console.log(`Bot ${i} joining match:`, matchID);
     if (!matchID) return;
     await socket.joinMatch(matchID);
@@ -85,8 +85,8 @@ async function createBot(i) {
     }
 
     // Random walk
-    lat += (Math.random() - 0.5) * 0.00005;
-    lon += (Math.random() - 0.5) * 0.00005;
+    lat += (Math.random() - 0.5) * 0.0001;
+    lon += (Math.random() - 0.5) * 0.0001;
 
     try {
       var opCode = 1;

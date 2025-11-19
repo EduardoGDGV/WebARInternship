@@ -391,5 +391,5 @@ func NewGlobalMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk r
 }
 
 func rpcJoinGlobalMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	return fmt.Sprintf(`{"match_id":"%s"}`, globalMatchID), nil
+	return globalMatchID, nil
 }

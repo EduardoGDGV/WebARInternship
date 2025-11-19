@@ -251,16 +251,16 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		return err
 	}
 	// Create the global match once
-    id, err := nk.MatchCreate(ctx, "global_match", map[string]interface{}{
-        "is_global": true,
-    })
-    if err != nil {
-        logger.Error("Failed to create global match at startup: ", err)
-        return err
-    }
+	id, err := nk.MatchCreate(ctx, "global_match", map[string]interface{}{
+		"is_global": true,
+	})
+	if err != nil {
+		logger.Error("Failed to create global match at startup: ", err)
+		return err
+	}
 
-    globalMatchID = id
-    logger.Info("Global match pre-created with ID: ", globalMatchID)
+	globalMatchID = id
+	logger.Info("Global match pre-created with ID: ", globalMatchID)
 
 	if err := initializer.RegisterRpc("join_global_match", rpcJoinGlobalMatch); err != nil {
 		return err

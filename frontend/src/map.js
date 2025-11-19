@@ -39,20 +39,6 @@ const centerLon = -46.72980;
 const FOV = 50;
 const TEXT_DECODER = new TextDecoder();
 
-// icons
-const redIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png",
-  iconAnchor: [12, 41]
-});
-const blueIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png",
-  iconAnchor: [12, 41]
-});
-const playerIcon = new L.Icon({
-  iconUrl: "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png",
-  iconAnchor: [12, 41]
-});
-
 const mapBounds = [
   [-23.557045162755653, -46.73422584856919],
   [-23.55147505044313, -46.73130018212596],
@@ -74,7 +60,7 @@ function initLeaflet(mapDivId, lat = centerLat, lon = centerLon) {
     maxZoom: 19,   // highest zoom supported by the tile server
   }).addTo(map);
   currentMap = map;
-  myMarker = L.marker([lat, lon], { icon: playerIcon }).addTo(map).bindPopup(`<b>You</b><br>Group: ${myGroup.name || 'None'}`);
+  myMarker = L.marker([lat, lon]).addTo(map).bindPopup(`<b>You</b><br>Group: ${myGroup.name || 'None'}`);
   createPlayerLabel(session.user_id, session.username, myGroup, lat, lon);
 
   const latitudes = mapBounds.map(p => p[0]);
@@ -155,7 +141,7 @@ function addEventsToMap(map, events) {
       </div>
     `;
 
-    const marker = L.marker([lat, lon], { icon })
+    const marker = L.marker([lat, lon])
       .addTo(map)
       .bindPopup(popupContent);
 
@@ -183,16 +169,25 @@ function createPlayerLabel(userId, username, group, lat, lon) {
 function updatePlayerMarker(userId, username, lat, lon, groupId) {
   if (!lat || !lon || isNaN(lat) || isNaN(lon)) return;
 
-  const isSelf = userId === session.user_id;
-  const icon = isSelf ? playerIcon : (groupId === myGroup?.id ? blueIcon : redIcon);
-  
+  // custom player icon
+  // const isSelf = userId === session.user_id;
+  // + color based on group
+
+  let group_name = null;
+  if (groups.has(groupId)) {
+    group_name = groups.get(groupId).group_name
+  } else {
+    console.log("Unknown group for player:", userId, groupId);
+    return; // unknown group, skip for now
+  }
+
   let marker = playerMarkers.get(userId);
   if (playerMarkers.has(userId)) {
     marker.setLatLng([lat, lon]);
   } else {
-    marker = L.marker([lat, lon], { icon })
+    marker = L.marker([lat, lon])
       .addTo(currentMap)
-      .bindPopup(`<b>${username}</b><br>Group: ${groups[groupId].groupname || 'None'}`);
+      .bindPopup(`<b>${username}</b><br>Group: ${group_name}`);
     playerMarkers.set(userId, marker);
   }
 
@@ -200,7 +195,7 @@ function updatePlayerMarker(userId, username, lat, lon, groupId) {
   if (playerLabels.has(userId)) {
     playerLabels.get(userId).setLatLng([lat, lon]);
   } else {
-    createPlayerLabel(userId, username, groups[groupId].groupname, lat, lon);
+    createPlayerLabel(userId, username, group_name, lat, lon);
   }
 }
 
@@ -259,6 +254,7 @@ function setupSocketHandlers() {
     try {
       const opCode = matchData.op_code;
       const data = JSON.parse(TEXT_DECODER.decode(matchData.data));
+      console.log("Match data received:", opCode, data);
 
       if (opCode === 10) {
         // add/update cache for each user in payload
@@ -269,8 +265,8 @@ function setupSocketHandlers() {
             groupId: user.group_id,
           };
           players.set(userId, record);
-          if (user.group_id && !groups.has(user.group_id)) {
-            groups.set(user.group_id, { groupname: user.group_name });
+          if (user.group_id && !groups.has(user.group_id) && user.group_name) {
+            groups.set(user.group_id, { group_name: user.group_name });
           }
 
           // if the payload includes the current user, update our local group info
@@ -292,10 +288,10 @@ function setupSocketHandlers() {
         data.forEach(update => {
           // position update { user_id, lat, lon }
           const userId = update.user_id;
+          if (!players.has(userId)) return; // unknown player, wait for join info
           if (userId === session.user_id) return; // ignore own echo
           const pos = { lat: update.lat, lon: update.lon };
-          const player = players.get(userId) || { username: null, groupId: null };
-          players.set(userId, player);
+          const player = players.get(userId);
 
           // if they're within FOV, create/update a marker, otherwise remove if exists
           if (myMarker) {
@@ -418,8 +414,8 @@ function startPositionUpdates() {
   setInterval(async () => {
     if (!myMarker) return;
 
-    lat += (Math.random() - 0.5) * 0.0002;
-    lon += (Math.random() - 0.5) * 0.0002;
+    lat += (Math.random() - 0.5) * 0.0001;
+    lon += (Math.random() - 0.5) * 0.0001;
 
     myMarker.setLatLng([lat, lon]);
 
@@ -450,7 +446,7 @@ export async function initMap(mapDivId) {
   await initSocket();
   
   if (!socket) return;
-  const res = await socket.rpc("get_match");
+  const res = await socket.rpc("join_global_match");
   if (!res) return;
   matchID = res.payload;
   console.log("Joining match:", matchID);
