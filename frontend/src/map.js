@@ -36,7 +36,7 @@ let currentMap = null;
 // settings
 const centerLat = -23.55574;
 const centerLon = -46.72980;
-const FOV = 30;
+const FOV = 20;
 const TEXT_DECODER = new TextDecoder();
 
 const mapBounds = [
@@ -265,7 +265,7 @@ function setupSocketHandlers() {
             groupId: user.group_id,
           };
           players.set(userId, record);
-          if (user.group_id && !groups.has(user.group_id) && user.group_name) {
+          if (user.group_id !== null && !groups.has(user.group_id) && user.group_name) {
             groups.set(user.group_id, { group_name: user.group_name });
           }
 
@@ -318,6 +318,11 @@ function setupSocketHandlers() {
           // position update { user_id, lat, lon }
           const userId = update.user_id;
           if (userId === session.user_id) return; // ignore own echo
+          if (myGroup.id === null) {
+            myGroup.id = players.get(userId)?.groupId || null;
+            myGroup.name = myGroup.id ? groups.get(myGroup.id)?.group_name || null : null;
+            if (myMarker) myMarker.bindPopup(`<b>You</b><br>Group: ${myGroup.name || 'None'}`);
+          }
           if (!players.has(userId)) return; // unknown player, wait for join info
           const player = players.get(userId);
           const pos = { lat: update.lat, lon: update.lon };

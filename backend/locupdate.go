@@ -17,7 +17,11 @@ type Position struct {
 }
 
 // Each stream cell covers ~20 meters
-const CELL_SIZE float64 = 0.0002
+const (
+	CELL_SIZE          float64 = 0.0002
+	TICK_RATE          int     = 20
+	UPDATES_PER_SECOND int     = 2
+)
 
 // Campus polygon bounds
 var mapBounds = [][2]float64{
@@ -76,12 +80,30 @@ type Player struct {
 	// other fields (lastBroadcastTime, etc) to be added
 }
 
+// Data map sent to clients about joining/connected players
+type UserData struct {
+	UserID    string `json:"user_id"`
+	Username  string `json:"username"`
+	GroupID   int    `json:"group_id"`
+	GroupName string `json:"group_name"`
+}
+
+// update structure for location updates
+type update struct {
+	UserID string  `json:"user_id"`
+	Lat    float64 `json:"lat"`
+	Lon    float64 `json:"lon"`
+}
+
 type MatchState struct {
 	Debug       bool
 	Players     map[string]*Player                 // userID -> player
 	playersCell map[string][2]int                  // userID -> {latIndex, lonIndex}
 	cellPlayers map[int]map[int]map[string]*Player // latIndex -> lonIndex -> userID -> player
-	// temporary buffers per tick, created locally in MatchLoop
+	// batched updates for broadcasting every second
+	cellUpdates   map[int]map[int][]update
+	groupUpdates  map[int][]update
+	lastBroadcast int64 // unix ms
 }
 
 func distanceMeters(a, b Position) float64 {
@@ -93,28 +115,23 @@ func distanceMeters(a, b Position) float64 {
 // Match lifecycle
 func (m *GlobalMatch) MatchInit(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, params map[string]interface{}) (interface{}, int, string) {
 	state := &MatchState{
-		Debug:       true,
-		Players:     make(map[string]*Player),
-		playersCell: make(map[string][2]int),
-		cellPlayers: make(map[int]map[int]map[string]*Player),
+		Debug:         true,
+		Players:       make(map[string]*Player),
+		playersCell:   make(map[string][2]int),
+		cellPlayers:   make(map[int]map[int]map[string]*Player),
+		cellUpdates:   make(map[int]map[int][]update),
+		groupUpdates:  make(map[int][]update),
+		lastBroadcast: 0,
 	}
-	tickRate := 20 //expected ~40 updates per tick = ~800 updates per second
 	label := "global_match"
 	logger.Info("Initialized match global_match.")
-	return state, tickRate, label
+	//expected ~40 updates per tick = ~800 updates per second
+	return state, TICK_RATE, label
 }
 
 func (m *GlobalMatch) MatchJoinAttempt(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presence runtime.Presence, metadata map[string]string) (interface{}, bool, string) {
 	// Allow all joins by default
 	return state, true, ""
-}
-
-// Data map sent to clients about joining/connected players
-type UserData struct {
-	UserID    string `json:"user_id"`
-	Username  string `json:"username"`
-	GroupID   int    `json:"group_id"`
-	GroupName string `json:"group_name"`
 }
 
 func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
@@ -271,17 +288,7 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		return state
 	}
 
-	// local types and buffers
-	type update struct {
-		UserID string  `json:"user_id"`
-		Lat    float64 `json:"lat"`
-		Lon    float64 `json:"lon"`
-	}
-	// per-cell aggregated updates: latIdx -> lonIdx -> []update
-	cellUpdates := make(map[int]map[int][]update)
-	// per-group aggregated updates: group_id -> []update
-	groupUpdates := make(map[int][]update)
-
+	// Aggregated updates per tick
 	// Process incoming messages and populate buffers and spatial index
 	for _, msg := range messages {
 		if msg.GetOpCode() != 1 {
@@ -300,11 +307,17 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 			continue
 		}
 
+		// Sanity checks
+		if math.IsNaN(newPos.Lat) || math.IsNaN(newPos.Lon) || newPos.Lat < -90 || newPos.Lat > 90 || newPos.Lon < -180 || newPos.Lon > 180 {
+			logger.Warn(fmt.Sprintf("Invalid pos values from %s: %+v", userID, newPos))
+			continue
+		}
+
 		// Validation checks
 		if player.Position.Lat != 0 || player.Position.Lon != 0 {
 			prev := player.Position
-			if tick-player.lastUpdate < 20 {
-				continue // skip if last update was less than 1 second ago
+			if tick-player.lastUpdate < int64(TICK_RATE/UPDATES_PER_SECOND) {
+				continue // skip if last update is too recent
 			}
 			dist := distanceMeters(prev, newPos)
 			if dist > 30 {
@@ -330,19 +343,23 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		latIdx, lonIdx := cellIndices(newPos.Lat, newPos.Lon)
 		// append to cell updates
 		up := update{UserID: userID, Lat: newPos.Lat, Lon: newPos.Lon}
-		if _, ok := cellUpdates[latIdx]; !ok {
-			cellUpdates[latIdx] = make(map[int][]update)
+		if _, ok := s.cellUpdates[latIdx]; !ok {
+			s.cellUpdates[latIdx] = make(map[int][]update)
 		}
 		groupId := player.GroupID
-		if _, ok := groupUpdates[groupId]; !ok {
-			groupUpdates[groupId] = make([]update, 0)
+		if _, ok := s.groupUpdates[groupId]; !ok {
+			s.groupUpdates[groupId] = make([]update, 0)
 		}
-		cellUpdates[latIdx][lonIdx] = append(cellUpdates[latIdx][lonIdx], up)
-		groupUpdates[groupId] = append(groupUpdates[groupId], up)
+		s.cellUpdates[latIdx][lonIdx] = append(s.cellUpdates[latIdx][lonIdx], up)
+		s.groupUpdates[groupId] = append(s.groupUpdates[groupId], up)
+	}
+
+	if tick-s.lastBroadcast < int64(TICK_RATE/UPDATES_PER_SECOND) {
+		return s // broadcast at the rate of UPDATES_PER_SECOND
 	}
 
 	// Broadcast proximity updates cell-by-cell
-	for latIdx, row := range cellUpdates {
+	for latIdx, row := range s.cellUpdates {
 		for lonIdx, updates := range row {
 			// Serialize updates of THIS cell once
 			payload, err := json.Marshal(updates)
@@ -374,7 +391,8 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		}
 	}
 
-	for groupID, updates := range groupUpdates {
+	// Broadcast group updates
+	for groupID, updates := range s.groupUpdates {
 		payload, err := json.Marshal(updates)
 		if err != nil {
 			logger.Warn("Marshal cell update failed: " + err.Error())
@@ -393,6 +411,10 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 			dispatcher.BroadcastMessage(2, payload, presences, nil, false)
 		}
 	}
+	// Clear update buffers
+	s.cellUpdates = make(map[int]map[int][]update)
+	s.groupUpdates = make(map[int][]update)
+	s.lastBroadcast = tick
 	return s
 }
 
