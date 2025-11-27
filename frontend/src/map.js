@@ -265,8 +265,14 @@ function setupSocketHandlers() {
             groupId: user.group_id,
           };
           players.set(userId, record);
-          if (user.group_id !== null && !groups.has(user.group_id) && user.group_name) {
-            groups.set(user.group_id, { group_name: user.group_name });
+          if (user.group_id !== null){
+            if(!groups.has(user.group_id) && user.group_name) {
+              groups.set(user.group_id, { group_name: user.group_name, playerCount: 1 });
+            } else if (groups.has(user.group_id)) {
+              const g = groups.get(user.group_id);
+              g.playerCount += 1;
+              groups.set(user.group_id, g);
+            }
           }
 
           // if the payload includes the current user, update our local group info
@@ -309,6 +315,9 @@ function setupSocketHandlers() {
             updatePlayerMarker(userId, player.username, pos.lat, pos.lon, player.groupId);
           }
         });
+        for (const [groupId, group] of groups.entries()) {
+          console.log(`${group.group_name} (${groupId}) has ${group.playerCount} players.`);
+        }
         return;
       }
 
@@ -466,7 +475,9 @@ function startPositionUpdates() {
 export async function initMap(mapDivId) {
   await initSession();
   await initSocket();
-  
+  // Before joining the match, to recieve data on join
+  setupSocketHandlers();
+
   if (!socket) return;
   const res = await socket.rpc("join_global_match");
   if (!res) return;
@@ -479,6 +490,5 @@ export async function initMap(mapDivId) {
   const events = await fetchEvents();
   addEventsToMap(map, events);
 
-  setupSocketHandlers();
   startPositionUpdates();
 }

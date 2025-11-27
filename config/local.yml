@@ -1,9 +1,36 @@
 logger:
-    level: DEBUG
+  level: DEBUG
 
 database:
     addresses:
-        - "postgres:localdb@postgres:5432/nakama"
+    - "postgres:localdb@postgres:5432/nakama"
     max_open_conns: 100
     max_idle_conns: 50
     conn_max_lifetime_sec: 3600
+
+session:
+  token_expiry_sec: 7200 # 2 hours
+
+runtime:
+    tick_rate: 20
+    match:
+        max_players: 1000      # max players per match
+        input_queue_size: 8192
+        call_queue_size: 8192
+        deferred_queue_size: 8192
+        max_messages_per_tick: 5000
+
+socket:
+    max_message_size_bytes: 262144 # Increased buffer for larger messages
+    max_request_size_bytes: 262144 # Larger buffer to handle bigger requests
+    read_buffer_size_bytes: 262144 # Larger read buffer
+    write_buffer_size_bytes: 262144 # Larger write buffer
+    outgoing_queue_size: 8192 # Higher queue size to handle more messages per session
+
+    # Connection lifecycle settings
+    idle_timeout_ms: 120000 # Default: 60000
+    ping_period_ms: 100000 # Default: 15000
+    pong_wait_ms: 120000 # Default: 25000
+    write_timeout_ms: 120000 # Default: 10000
+    read_timeout_ms: 120000 # Default: 10000
+    write_wait_ms: 120000 # Default: 5000

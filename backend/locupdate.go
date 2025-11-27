@@ -18,9 +18,10 @@ type Position struct {
 
 // Each stream cell covers ~20 meters
 const (
-	CELL_SIZE          float64 = 0.0002
-	TICK_RATE          int     = 20
-	UPDATES_PER_SECOND int     = 2
+	CELL_SIZE             float64 = 0.0002
+	TICK_RATE             int     = 20
+	UPDATES_PER_SECOND    int     = 1
+	BROADCASTS_PER_SECOND int     = 20
 )
 
 // Campus polygon bounds
@@ -354,8 +355,8 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		s.groupUpdates[groupId] = append(s.groupUpdates[groupId], up)
 	}
 
-	if tick-s.lastBroadcast < int64(TICK_RATE/UPDATES_PER_SECOND) {
-		return s // broadcast at the rate of UPDATES_PER_SECOND
+	if tick-s.lastBroadcast < int64(TICK_RATE/BROADCASTS_PER_SECOND) {
+		return s // broadcast at the rate of BROADCASTS_PER_SECOND
 	}
 
 	// Broadcast proximity updates cell-by-cell

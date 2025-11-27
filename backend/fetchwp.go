@@ -98,10 +98,8 @@ func getArrayFromMap(m map[string]any, keys ...string) []any {
 		if v, ok := m[k]; ok && v != nil {
 			switch x := v.(type) {
 			case []any:
-				fmt.Printf("found array for key %s", k)
 				return x
 			default:
-				fmt.Printf("found non-array for key %s: %T", k, x)
 				// if comma separated string
 				if s, ok := x.(string); ok {
 					parts := strings.Split(s, ",")
@@ -124,19 +122,15 @@ func parseFloatV(v any) (float64, error) {
 	}
 	switch x := v.(type) {
 	case float64:
-		fmt.Printf("parseFloatV: got float64 %f\n", x)
 		return x, nil
 	case int:
-		fmt.Printf("parseFloatV: got int %d\n", x)
 		return float64(x), nil
 	case string:
-		fmt.Printf("parseFloatV: got string %s\n", x)
 		if x == "" {
 			return 0, errors.New("empty")
 		}
 		return strconv.ParseFloat(x, 64)
 	default:
-		fmt.Printf("parseFloatV: unsupported type %T\n", v)
 		return 0, fmt.Errorf("unsupported type %T", v)
 	}
 }
@@ -147,13 +141,10 @@ func parseIntArray(arr []any) []int {
 	for _, v := range arr {
 		switch x := v.(type) {
 		case float64:
-			fmt.Printf("parseIntArray: got float64 %f\n", x)
 			out = append(out, int(x))
 		case int:
-			fmt.Printf("parseIntArray: got int %d\n", x)
 			out = append(out, x)
 		case string:
-			fmt.Printf("parseIntArray: got string %s\n", x)
 			if i, err := strconv.Atoi(strings.TrimSpace(x)); err == nil {
 				out = append(out, i)
 			}
@@ -194,6 +185,8 @@ func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error)
 		if rendered, ok := t["rendered"].(string); ok {
 			title = rendered
 		}
+	default:
+		title = ""
 	}
 
 	var lat, lon float64
@@ -237,9 +230,7 @@ func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error)
 }
 
 func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, error) {
-	logger.Info("Building Asset2D from WP post")
 	idf := int(post["id"].(float64))
-	logger.Info("Asset2D ID %d", idf)
 	var title string
 
 	switch t := post["title"].(type) {
@@ -249,17 +240,16 @@ func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, er
 		if rendered, ok := t["rendered"].(string); ok {
 			title = rendered
 		}
+	default:
+		title = ""
 	}
-	logger.Info("Asset title %s", title)
 
 	var imgURL string
 	if v, ok := post["image"]; ok {
-		logger.Info("Found image field for asset2d id %d", idf)
 		imgURL = v.(string)
 	} else {
 		logger.Error("failed to resolve event image url")
 	}
-	logger.Info("Image URL %s", imgURL)
 
 	return Asset2D{
 		ID:        idf,
@@ -280,6 +270,8 @@ func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
 		if rendered, ok := t["rendered"].(string); ok {
 			title = rendered
 		}
+	default:
+		title = ""
 	}
 
 	var front, back string
@@ -306,9 +298,7 @@ func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
 }
 
 func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
-	logger.Info("Building Item from WP post")
 	idf := int(post["id"].(float64))
-	logger.Info("Item ID %d", idf)
 	var title string
 
 	switch t := post["title"].(type) {
@@ -318,6 +308,8 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 		if rendered, ok := t["rendered"].(string); ok {
 			title = rendered
 		}
+	default:
+		title = ""
 	}
 
 	// Parse images
@@ -349,6 +341,8 @@ func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
 		if rendered, ok := t["rendered"].(string); ok {
 			title = rendered
 		}
+	default:
+		title = ""
 	}
 
 	var question string
@@ -368,7 +362,7 @@ func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
 			}
 		}
 	} else {
-		logger.Warn("missing alternatives for quiz id %v", idf)
+		logger.Error("missing alternatives for quiz id %v", idf)
 	}
 
 	var answer string
@@ -419,7 +413,7 @@ func notifyAll(ctx context.Context, nk runtime.NakamaModule, event string, paylo
 	// payload should be serializable
 	content := map[string]any{"data": payload}
 	if err := nk.NotificationSendAll(ctx, event, content, 1, false); err != nil {
-		// can't return error here; log via runtime logger is available in rpc entrypoints
+		// can't return error here
 	}
 }
 
@@ -506,7 +500,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
-		notifyAll(ctx, nk, "update", as)
+		//notifyAll(ctx, nk, "update", as)
 		logger.Info("Stored asset2d %d", as.ID)
 	case "card":
 		ca, err := buildCardFromWP(logger, raw)
@@ -518,7 +512,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
-		notifyAll(ctx, nk, "update", ca)
+		//notifyAll(ctx, nk, "update", ca)
 		logger.Info("Stored card %d", ca.ID)
 	case "item":
 		it, err := buildItemFromWP(logger, raw)
@@ -530,7 +524,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
-		notifyAll(ctx, nk, "update", it)
+		//notifyAll(ctx, nk, "update", it)
 		logger.Info("Stored item %d", it.ID)
 	case "quiz":
 		qz, err := buildQuizFromWP(logger, raw)
@@ -542,7 +536,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
-		notifyAll(ctx, nk, "update", qz)
+		//notifyAll(ctx, nk, "update", qz)
 		logger.Info("Stored quiz %d", qz.ID)
 	default:
 		logger.Error("unsupported type: %s", typeVal)
