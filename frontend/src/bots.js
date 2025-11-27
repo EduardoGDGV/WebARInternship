@@ -61,8 +61,8 @@ async function createBot(i) {
   };
 
   // Initial random position
-  let lat = -23.55574 + (Math.random() - 0.5) * 0.002;
-  let lon = -46.72980 + (Math.random() - 0.5) * 0.002;
+  let lat = -23.55574 + (Math.random() - 0.5) * 0.005;
+  let lon = -46.72980 + (Math.random() - 0.5) * 0.005;
   let matchID = null;
   if (!socket) return;
   try {

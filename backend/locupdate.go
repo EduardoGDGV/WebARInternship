@@ -21,7 +21,7 @@ const (
 	CELL_SIZE             float64 = 0.0002
 	TICK_RATE             int     = 20
 	UPDATES_PER_SECOND    int     = 1
-	BROADCASTS_PER_SECOND int     = 20
+	BROADCASTS_PER_SECOND int     = 2
 )
 
 // Campus polygon bounds
@@ -37,7 +37,7 @@ func cellIndices(lat, lon float64) (int, int) {
 	return int(math.Floor(lat / CELL_SIZE)), int(math.Floor(lon / CELL_SIZE))
 }
 
-// Integer cell indices
+// Cell neighbors (including self)
 func getNeighborCells(latIndex, lonIndex int) [][2]int {
 	neighbors := make([][2]int, 0, 9)
 	for di := -1; di <= 1; di++ {
@@ -98,9 +98,9 @@ type update struct {
 
 type MatchState struct {
 	Debug       bool
-	Players     map[string]*Player                 // userID -> player
-	playersCell map[string][2]int                  // userID -> {latIndex, lonIndex}
-	cellPlayers map[int]map[int]map[string]*Player // latIndex -> lonIndex -> userID -> player
+	Players     map[string]*Player          		// userID -> player
+	playersCell map[string][2]int           		// userID -> {latIndex, lonIndex}
+	cellPlayers map[int]map[int]map[string]struct{} // latIndex -> lonIndex -> userID
 	// batched updates for broadcasting every second
 	cellUpdates   map[int]map[int][]update
 	groupUpdates  map[int][]update
@@ -119,7 +119,7 @@ func (m *GlobalMatch) MatchInit(ctx context.Context, logger runtime.Logger, db *
 		Debug:         true,
 		Players:       make(map[string]*Player),
 		playersCell:   make(map[string][2]int),
-		cellPlayers:   make(map[int]map[int]map[string]*Player),
+		cellPlayers:   make(map[int]map[int]map[string]struct{}),
 		cellUpdates:   make(map[int]map[int][]update),
 		groupUpdates:  make(map[int][]update),
 		lastBroadcast: 0,
@@ -205,14 +205,6 @@ func (m *GlobalMatch) MatchLeave(ctx context.Context, logger runtime.Logger, db 
 			if row, ok1 := s.cellPlayers[li]; ok1 {
 				if col, ok2 := row[lj]; ok2 {
 					delete(col, uid)
-					// cleanup col
-					if len(col) == 0 {
-						delete(row, lj)
-					}
-				}
-				// cleanup row
-				if len(row) == 0 {
-					delete(s.cellPlayers, li)
 				}
 			}
 			delete(s.playersCell, uid)
@@ -224,8 +216,8 @@ func (m *GlobalMatch) MatchLeave(ctx context.Context, logger runtime.Logger, db 
 }
 
 // movePlayer ensures the player is located in the correct nested cell maps
-func (s *MatchState) movePlayer(userID string, p *Player) {
-	latIdx, lonIdx := cellIndices(p.Position.Lat, p.Position.Lon)
+func (s *MatchState) movePlayer(userID string, lat, lon float64) {
+	latIdx, lonIdx := cellIndices(lat, lon)
 
 	old, hadOld := s.playersCell[userID]
 
@@ -237,12 +229,6 @@ func (s *MatchState) movePlayer(userID string, p *Player) {
 			if row, ok := s.cellPlayers[oi]; ok {
 				if col, ok2 := row[oj]; ok2 {
 					delete(col, userID)
-					if len(col) == 0 {
-						delete(row, oj)
-					}
-				}
-				if len(row) == 0 {
-					delete(s.cellPlayers, oi)
 				}
 			}
 		}
@@ -250,15 +236,15 @@ func (s *MatchState) movePlayer(userID string, p *Player) {
 		// Add to new cell, creating nested maps as necessary
 		row, ok := s.cellPlayers[latIdx]
 		if !ok {
-			row = make(map[int]map[string]*Player)
+			row = make(map[int]map[string]struct{})
 			s.cellPlayers[latIdx] = row
 		}
 		col, ok := row[lonIdx]
 		if !ok {
-			col = make(map[string]*Player)
+			col = make(map[string]struct{})
 			row[lonIdx] = col
 		}
-		col[userID] = p
+		col[userID] = struct{}{}
 		s.playersCell[userID] = [2]int{latIdx, lonIdx}
 		return
 	}
@@ -266,16 +252,16 @@ func (s *MatchState) movePlayer(userID string, p *Player) {
 	// No movement across cells, ensure pointer is present
 	if row, ok := s.cellPlayers[latIdx]; ok {
 		if col, ok2 := row[lonIdx]; ok2 {
-			col[userID] = p
+			col[userID] = struct{}{}
 		} else {
-			ncol := make(map[string]*Player)
-			ncol[userID] = p
+			ncol := make(map[string]struct{})
+			ncol[userID] = struct{}{}
 			row[lonIdx] = ncol
 		}
 	} else {
-		row := make(map[int]map[string]*Player)
-		col := make(map[string]*Player)
-		col[userID] = p
+		row := make(map[int]map[string]struct{})
+		col := make(map[string]struct{})
+		col[userID] = struct{}{}
 		row[lonIdx] = col
 		s.cellPlayers[latIdx] = row
 	}
@@ -340,7 +326,7 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		player.Position = newPos
 		player.lastUpdate = tick
 		// Move player between nested cell maps
-		s.movePlayer(userID, player)
+		s.movePlayer(userID, newPos.Lat, newPos.Lon)
 		latIdx, lonIdx := cellIndices(newPos.Lat, newPos.Lon)
 		// append to cell updates
 		up := update{UserID: userID, Lat: newPos.Lat, Lon: newPos.Lon}
@@ -370,25 +356,23 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 			}
 
 			// Iterate through 9 neighbor cells
+			presences := make([]runtime.Presence, 0, 100)
 			neighbors := getNeighborCells(latIdx, lonIdx)
 			for _, c := range neighbors {
 				ni, nj := c[0], c[1]
-
 				// Get presences from the neighbor cell
 				presMap, ok := s.cellPlayers[ni][nj]
 				if !ok || len(presMap) == 0 {
 					continue
 				}
-
-				// Convert to slice for Nakama
-				presences := make([]runtime.Presence, 0, len(presMap))
+				// Append presences
 				for userID := range presMap {
 					presences = append(presences, s.Players[userID].Presence)
 				}
-
-				// Broadcast to players of that neighbor cell
-				dispatcher.BroadcastMessage(1, payload, presences, nil, false)
 			}
+			// Broadcast to players of that neighbor cell
+			dispatcher.BroadcastMessage(1, payload, presences, nil, false)
+			s.cellUpdates[latIdx][lonIdx] = updates[:0] // clear updates
 		}
 	}
 
@@ -411,10 +395,9 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		if len(presences) > 0 {
 			dispatcher.BroadcastMessage(2, payload, presences, nil, false)
 		}
+		s.groupUpdates[groupID] = updates[:0] // clear updates
 	}
-	// Clear update buffers
-	s.cellUpdates = make(map[int]map[int][]update)
-	s.groupUpdates = make(map[int][]update)
+	// Update last broadcast tick
 	s.lastBroadcast = tick
 	return s
 }
