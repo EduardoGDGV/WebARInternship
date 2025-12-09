@@ -315,9 +315,6 @@ function setupSocketHandlers() {
             updatePlayerMarker(userId, player.username, pos.lat, pos.lon, player.groupId);
           }
         });
-        for (const [groupId, group] of groups.entries()) {
-          console.log(`${group.group_name} (${groupId}) has ${group.playerCount} players.`);
-        }
         return;
       }
 

@@ -132,6 +132,8 @@ type WorldEngine struct {
 	updatesMu         map[int]*sync.Mutex
 	cellMatchUpdates  map[int]map[int64]*[]update // matchID -> cellKey -> pointer to slice (pooled)
 	groupMatchUpdates map[int]map[int]*[]update   // matchID -> groupID -> pointer to slice (pooled)
+	joinUpdates 	  map[int]*[]UserData // per-match join events (pooled)
+
 }
 
 var (
@@ -147,6 +149,7 @@ func GetWorldEngine() *WorldEngine {
 			cells:             make(map[int]map[int64]*Cell),
 			cellMatchUpdates:  make(map[int]map[int64]*[]update),
 			groupMatchUpdates: make(map[int]map[int]*[]update),
+			joinUpdates:	   make(map[int]*[]UserData),
 			cellsMu:           make(map[int]*sync.RWMutex),
 			updatesMu:         make(map[int]*sync.Mutex),
 		}
@@ -158,6 +161,7 @@ func GetWorldEngine() *WorldEngine {
 			world.cells[matchId] = make(map[int64]*Cell)
 			world.cellMatchUpdates[matchId] = make(map[int64]*[]update)
 			world.groupMatchUpdates[matchId] = make(map[int]*[]update)
+			world.joinUpdates[matchId] = nil
 		}
 
 	})
@@ -360,7 +364,7 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 	up := update{UserID: userID, Lat: pos.Lat, Lon: pos.Lon}
 	neighbors := getNeighborCells(li, lj)
 	// Append to all neighboring cells' update buffers
-	for matchId := range 4 {
+	for matchId := range NumMatches {
 		for _, nc := range neighbors {
 			nk := cellKey(nc[0], nc[1])
 			w.ensureMatchUpdates(matchId, nil, &nk, up)
@@ -507,7 +511,7 @@ func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *
 		dispatcher.BroadcastMessage(10, payload, presences, nil, false)
 	}
 
-	// Notify local players of joins
+	// Notify all players of joins
 	if len(joins) > 0 {
 		payload, _ := json.Marshal(joins)
 		localPres := make([]runtime.Presence, 0, len(s.Players))
@@ -516,6 +520,18 @@ func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *
 		}
 		if len(localPres) > 0 {
 			dispatcher.BroadcastMessage(10, payload, localPres, nil, false)
+		}
+		for matchid := range NumMatches {
+			if matchid == s.MatchID {
+				continue
+			}
+			world.updatesMu[matchid].Lock()
+			if world.joinUpdates[matchid] == nil {
+				up := make([]UserData, 0, 16)
+				world.joinUpdates[matchid] = &up
+			}
+			*world.joinUpdates[matchid] = append(*world.joinUpdates[matchid], joins...)
+			world.updatesMu[matchid].Unlock()
 		}
 	}
 	return s
@@ -605,6 +621,18 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		if len(pres) > 0 {
 			dispatcher.BroadcastMessage(2, payload, pres, nil, false)
 		}
+	}
+
+	// Broadcast join updates from other matches
+	world.updatesMu[s.MatchID].Lock()
+	buf := world.joinUpdates[s.MatchID]
+	if buf != nil && len(*buf) > 0 {
+		payload, _ := json.Marshal(*buf)
+		world.joinUpdates[s.MatchID] = nil
+		world.updatesMu[s.MatchID].Unlock()
+		dispatcher.BroadcastMessage(10, payload, nil, nil, false)
+	} else {
+		world.updatesMu[s.MatchID].Unlock()
 	}
 
 	s.lastBroadcast = tick
