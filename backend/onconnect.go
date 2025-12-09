@@ -16,19 +16,15 @@ import (
 	"math"
 	"sync"
 
-	"github.com/heroiclabs/nakama-common/api"
+	//"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
 const (
 	GroupNamePrefix = "Group"
 	MaxGroups       = 80
+	NumMatches	  	= 4
 	AdminID         = "5c6f4519-0ba6-4fd2-b26d-f3639c3bf1e3"
-)
-
-var (
-	// globalMatchID holds the ID of the pre-created global match
-	globalMatchID string
 )
 
 // GroupManager
@@ -132,13 +128,14 @@ func (gm *GroupManager) Init(ctx context.Context) error {
 // GetNextGroup finds index of the group to add a user to
 // Pick group with minimum size and tie-break via nextTieIndex to create round-robin across equals
 func (gm *GroupManager) GetNextGroup() int {
+    n := len(gm.groups)
+    start := gm.nextTieIndex
+
+    if n == 0 {
+        return -1
+    }
 	bestIdx := 0
 	bestSize := math.MaxInt32
-	n := len(gm.groups)
-	if n == 0 {
-		return -1
-	}
-	start := gm.nextTieIndex
 
 	for i := range n {
 		idx := (start + i) % n
@@ -148,6 +145,7 @@ func (gm *GroupManager) GetNextGroup() int {
 			bestIdx = idx
 		}
 	}
+
 	// advance tie index so next tie will prefer next group
 	gm.nextTieIndex = (gm.nextTieIndex + 1) % n
 	return bestIdx
@@ -155,29 +153,37 @@ func (gm *GroupManager) GetNextGroup() int {
 
 // Assigns a user to a group (Nakama + Cache)
 func (gm *GroupManager) AssignUser(ctx context.Context, userID string) (string, error) {
-	gm.mu.Lock()
-	defer gm.mu.Unlock()
+    // Try to reserve group index under lock
+    gm.mu.Lock()
+    if idx, ok := gm.userToGroup[userID]; ok {
+        name := gm.groups[idx].Name
+        gm.mu.Unlock()
+        return name, nil
+    }
 
-	// If user already assigned, return existing
-	if idx, ok := gm.userToGroup[userID]; ok {
-		return gm.groups[idx].Name, nil
-	}
+    idx := gm.GetNextGroup()
+    if idx < 0 || idx >= len(gm.groups) {
+        gm.mu.Unlock()
+        return "", fmt.Errorf("no groups available")
+    }
+    group := gm.groups[idx]
+    gm.mu.Unlock()
+    // Perform external call (no gm lock)
+    if err := gm.nk.GroupUsersAdd(ctx, "", group.ID, []string{userID}); err != nil {
+        return "", fmt.Errorf("GroupUsersAdd failed: %w", err)
+    }
 
-	idx := gm.GetNextGroup()
-	if idx < 0 || idx >= len(gm.groups) {
-		return "", fmt.Errorf("no groups available")
-	}
-
-	group := gm.groups[idx]
-	// update Nakama first (so server authoritative membership exists), if this fails we don't mutate cache
-	if err := gm.nk.GroupUsersAdd(ctx, "", group.ID, []string{userID}); err != nil {
-		return "", fmt.Errorf("GroupUsersAdd failed: %w", err)
-	}
-
-	// update cache
-	group.Members[userID] = struct{}{}
-	gm.userToGroup[userID] = idx
-	return group.Name, nil
+    // After external success, acquire lock and update cache
+    gm.mu.Lock()
+    defer gm.mu.Unlock()
+    if existingIdx, ok := gm.userToGroup[userID]; ok {
+        // someone else already assigned concurrently, prefer existing assignment
+        return gm.groups[existingIdx].Name, nil
+    }
+    // commit to cache
+    group.Members[userID] = struct{}{}
+    gm.userToGroup[userID] = idx
+    return group.Name, nil
 }
 
 // RemoveUser removes a user from their group, both in Nakama and cache (unused right now)
@@ -203,9 +209,14 @@ func (gm *GroupManager) RemoveUser(ctx context.Context, userID string) error {
 
 // GetUserGroup returns the cached group name and index for a user (if any)
 func (gm *GroupManager) GetUserGroup(nk runtime.NakamaModule, ctx context.Context, userID string) (string, string, bool) {
+	gm.mu.RLock()
 	if idx, ok := gm.userToGroup[userID]; ok && idx < len(gm.groups) {
-		return gm.groups[idx].ID, gm.groups[idx].Name, true
+		id := gm.groups[idx].ID
+        name := gm.groups[idx].Name
+        gm.mu.RUnlock()
+        return id, name, true
 	}
+	gm.mu.RUnlock()
 
 	// Fallback query Nakama (in case cache missed it)
 	groups, _, err := nk.UserGroupsList(ctx, userID, 1, nil, "")
@@ -232,17 +243,34 @@ func (gm *GroupManager) GetUserGroup(nk runtime.NakamaModule, ctx context.Contex
 // Initialize global group manager
 var groupManager *GroupManager
 
-func handlePlayerJoin(ctx context.Context, nk runtime.NakamaModule, userID string, logger runtime.Logger) {
-	// If user already has a group no need to assign
-	if _, _, ok := groupManager.GetUserGroup(nk, ctx, userID); ok {
-		return
+func handlePlayerJoin(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	userID := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+	// check if already assigned
+	_, name, assigned := groupManager.GetUserGroup(nk, ctx, userID)
+	if assigned {
+		return name, nil
 	}
 	// assign via GroupManager (call GroupUsersAdd and update cache)
-	_, err := groupManager.AssignUser(ctx, userID)
+	name, err := groupManager.AssignUser(ctx, userID)
 	if err != nil {
 		logger.WithField("err", err).Error("AssignUser failed")
-		return
+		return "", err
 	}
+	return name, nil
+}
+
+var globalMatchManager *MatchManager
+var once sync.Once
+
+type MatchManager struct {
+	matchIDs [NumMatches]string // persistent matches
+}
+
+func GetMatchManager() *MatchManager {
+	once.Do(func() {
+		globalMatchManager = &MatchManager{}
+	})
+	return globalMatchManager
 }
 
 // Init Module
@@ -250,19 +278,24 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	if err := initializer.RegisterMatch("global_match", NewGlobalMatch); err != nil {
 		return err
 	}
-	// Create the global match once
-	id, err := nk.MatchCreate(ctx, "global_match", map[string]interface{}{
-		"is_global": true,
-	})
-	if err != nil {
-		logger.Error("Failed to create global match at startup: ", err)
-		return err
+	
+	// create persistent matches
+	mm := GetMatchManager()
+
+	for i := range NumMatches {
+		params := map[string]any{
+			"match_id": i,
+		}
+		matchID, err := nk.MatchCreate(ctx, "global_match", params)
+		if err != nil {
+			logger.Error("Failed creating persistent match %d: %v", i, err)
+			return err
+		}
+		mm.matchIDs[i] = matchID
+		logger.Info("Created global match %d : %s", i, matchID)
 	}
 
-	globalMatchID = id
-	logger.Info("Global match pre-created with ID: ", globalMatchID)
-
-	if err := initializer.RegisterRpc("join_global_match", rpcJoinGlobalMatch); err != nil {
+	if err := initializer.RegisterRpc("get_match", rpcGetGlobalMatch); err != nil {
 		return err
 	}
 
@@ -272,14 +305,7 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 		return err
 	}
 
-	// On session start
-	if err := initializer.RegisterEventSessionStart(
-		func(ctx context.Context, logger runtime.Logger, evt *api.Event) {
-			userID, _ := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
-			// try to ensure user assigned a group on connect
-			handlePlayerJoin(ctx, nk, userID, logger)
-		},
-	); err != nil {
+	if err := initializer.RegisterRpc("join_group", handlePlayerJoin); err != nil {
 		return err
 	}
 

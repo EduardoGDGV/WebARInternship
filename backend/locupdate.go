@@ -6,17 +6,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
-// Compact binary position
+// World parameters
 type Position struct {
 	Lat float64 `json:"lat"`
 	Lon float64 `json:"lon"`
 }
 
-// Each stream cell covers ~20 meters
 const (
 	CELL_SIZE             float64 = 0.0002
 	TICK_RATE             int     = 20
@@ -24,7 +24,6 @@ const (
 	BROADCASTS_PER_SECOND int     = 2
 )
 
-// Campus polygon bounds
 var mapBounds = [][2]float64{
 	{-23.557045162755653, -46.73422584856919},
 	{-23.55147505044313, -46.73130018212596},
@@ -32,23 +31,20 @@ var mapBounds = [][2]float64{
 	{-23.55966804391334, -46.72839059081891},
 }
 
-// Integer cell key
 func cellIndices(lat, lon float64) (int, int) {
 	return int(math.Floor(lat / CELL_SIZE)), int(math.Floor(lon / CELL_SIZE))
 }
 
-// Cell neighbors (including self)
 func getNeighborCells(latIndex, lonIndex int) [][2]int {
-	neighbors := make([][2]int, 0, 9)
+	n := make([][2]int, 0, 9)
 	for di := -1; di <= 1; di++ {
 		for dj := -1; dj <= 1; dj++ {
-			neighbors = append(neighbors, [2]int{latIndex + di, lonIndex + dj})
+			n = append(n, [2]int{latIndex + di, lonIndex + dj})
 		}
 	}
-	return neighbors
+	return n
 }
 
-// Ray casting to verify campus bounds
 func pointInPolygon(lat, lon float64, poly [][2]float64) bool {
 	inside := false
 	n := len(poly)
@@ -67,7 +63,358 @@ func pointInPolygon(lat, lon float64, poly [][2]float64) bool {
 	return inside
 }
 
-// Match structures
+func distanceMeters(a, b Position) float64 {
+	dLat := a.Lat - b.Lat
+	dLon := a.Lon - b.Lon
+	return math.Sqrt(dLat*dLat+dLon*dLon) * 111000
+}
+
+// Data sent to clients about users
+type UserData struct {
+	UserID    string `json:"user_id"`
+	Username  string `json:"username"`
+	GroupID   int    `json:"group_id"`
+	GroupName string `json:"group_name"`
+}
+
+// Update packet
+type update struct {
+	UserID string  `json:"user_id"`
+	Lat    float64 `json:"lat"`
+	Lon    float64 `json:"lon"`
+}
+
+// Cell and Pools
+type Cell struct {
+	mu      sync.Mutex
+	players map[string]struct{} // set of userIDs
+}
+
+var updatePool = sync.Pool{
+	New: func() any {
+		buf := make([]update, 0, 64)
+		return &buf
+	},
+}
+
+func getUpdateSlice() *[]update {
+	return updatePool.Get().(*[]update)
+}
+
+func putUpdateSlice(p *[]update) {
+	*p = (*p)[:0]
+	updatePool.Put(p)
+}
+
+// Player state in world
+type PlayerState struct {
+	UserID    string
+	Username  string
+	GroupID   int
+	GroupName string
+	Pos       Position
+	LastTick  int64
+	MatchID   int
+}
+
+// WorldEngine (singleton)
+type WorldEngine struct {
+	// Player maps
+	playerMu    sync.RWMutex
+	playerState map[string]*PlayerState // userID -> state
+	playerCell  map[string]int64        // userID -> cellKey
+
+	// Cell maps divided by match
+	cellsMu map[int]*sync.RWMutex
+	cells   map[int]map[int64]*Cell // matchID -> cellKey -> Cell
+
+	// Per-match buffered updates
+	updatesMu         map[int]*sync.Mutex
+	cellMatchUpdates  map[int]map[int64]*[]update // matchID -> cellKey -> pointer to slice (pooled)
+	groupMatchUpdates map[int]map[int]*[]update   // matchID -> groupID -> pointer to slice (pooled)
+}
+
+var (
+	worldOnce sync.Once
+	world     *WorldEngine
+)
+
+func GetWorldEngine() *WorldEngine {
+	worldOnce.Do(func() {
+		world = &WorldEngine{
+			playerState:       make(map[string]*PlayerState),
+			playerCell:        make(map[string]int64),
+			cells:             make(map[int]map[int64]*Cell),
+			cellMatchUpdates:  make(map[int]map[int64]*[]update),
+			groupMatchUpdates: make(map[int]map[int]*[]update),
+			cellsMu:           make(map[int]*sync.RWMutex),
+			updatesMu:         make(map[int]*sync.Mutex),
+		}
+		for matchId := range NumMatches {
+			// Per-match mutex
+			world.updatesMu[matchId] = &sync.Mutex{}
+			world.cellsMu[matchId] = &sync.RWMutex{}
+			// Initialize maps
+			world.cells[matchId] = make(map[int64]*Cell)
+			world.cellMatchUpdates[matchId] = make(map[int64]*[]update)
+			world.groupMatchUpdates[matchId] = make(map[int]*[]update)
+		}
+
+	})
+	return world
+}
+
+// helper to encode cell key in a single int64
+func cellKey(i, j int) int64 {
+	return (int64(i) << 32) | int64(uint32(j))
+}
+
+func (w *WorldEngine) ensureCellExists(matchId int, cellId int64) *Cell {
+	// First check without lock
+	w.cellsMu[matchId].RLock()
+	matchCells, ok := w.cells[matchId]
+	if ok {
+		if cell, ok2 := matchCells[cellId]; ok2 {
+			w.cellsMu[matchId].RUnlock()
+			return cell
+		}
+	}
+	w.cellsMu[matchId].RUnlock()
+
+	// Upgrade to write lock
+	w.cellsMu[matchId].Lock()
+	// Re-check match map, because another goroutine may have created it meanwhile
+	matchCells, ok = w.cells[matchId]
+	if !ok {
+		matchCells = make(map[int64]*Cell)
+		w.cells[matchId] = matchCells
+	}
+
+	// Re-check cell
+	cell, ok2 := matchCells[cellId]
+	if !ok2 {
+		cell = &Cell{players: make(map[string]struct{})}
+		matchCells[cellId] = cell
+	}
+
+	w.cellsMu[matchId].Unlock()
+	return cell
+}
+
+func (w *WorldEngine) ensureMatchUpdates(matchId int, groupId *int, cellId *int64, up update) {
+	w.updatesMu[matchId].Lock()
+	defer w.updatesMu[matchId].Unlock()
+
+	if cellId != nil {
+		// Cell updates
+		_, ok := w.cellMatchUpdates[matchId][*cellId]
+		if !ok {
+			w.cellMatchUpdates[matchId][*cellId] = getUpdateSlice()
+		}
+		*w.cellMatchUpdates[matchId][*cellId] = append(*w.cellMatchUpdates[matchId][*cellId], up)
+	}
+
+	if groupId != nil {
+		// Group updates
+		_, ok := w.groupMatchUpdates[matchId][*groupId]
+		if !ok {
+			w.groupMatchUpdates[matchId][*groupId] = getUpdateSlice()
+		}
+		*w.groupMatchUpdates[matchId][*groupId] = append(*w.groupMatchUpdates[matchId][*groupId], up)
+	}
+}
+
+// AddPlayer registers player to world, cells remain persistent and are created lazily and retained
+func (w *WorldEngine) AddPlayer(p *PlayerState) {
+	w.playerMu.Lock()
+	w.playerState[p.UserID] = p
+	w.playerMu.Unlock()
+
+	if p.Pos.Lat != 0 && p.Pos.Lon != 0 {
+		li, lj := cellIndices(p.Pos.Lat, p.Pos.Lon)
+		ck := cellKey(li, lj)
+		c := w.ensureCellExists(p.MatchID, ck)
+
+		c.mu.Lock()
+		c.players[p.UserID] = struct{}{}
+		c.mu.Unlock()
+
+		w.playerMu.Lock()
+		w.playerCell[p.UserID] = ck
+		w.playerMu.Unlock()
+	}
+}
+
+// RemovePlayer deletes player from world
+func (w *WorldEngine) RemovePlayer(userID string) {
+	// remove from player maps safely
+	w.playerMu.Lock()
+	ps, hadState := w.playerState[userID]
+	ck, hadCell := w.playerCell[userID]
+	if hadState {
+		delete(w.playerState, userID)
+	}
+	if hadCell {
+		delete(w.playerCell, userID)
+	}
+	w.playerMu.Unlock()
+
+	if hadCell && hadState {
+		// Remove from cell set
+		c := w.ensureCellExists(ps.MatchID, ck)
+		c.mu.Lock()
+		delete(c.players, userID)
+		c.mu.Unlock()
+	}
+}
+
+// FetchAllPublicUsers returns UserData for all known players, used for initial global snapshot on join
+func (w *WorldEngine) FetchAllPublicUsers() []UserData {
+	w.playerMu.RLock()
+	defer w.playerMu.RUnlock()
+	out := make([]UserData, 0, len(w.playerState))
+	for _, ps := range w.playerState {
+		out = append(out, UserData{
+			UserID:    ps.UserID,
+			Username:  ps.Username,
+			GroupID:   ps.GroupID,
+			GroupName: ps.GroupName,
+		})
+	}
+	return out
+}
+
+// Validate, move and append updates across matches
+func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
+	// quick read lock to fetch player state pointer
+	w.playerMu.RLock()
+	ps, ok := w.playerState[userID]
+	w.playerMu.RUnlock()
+	if !ok {
+		return
+	}
+
+	// validation
+	if math.IsNaN(pos.Lat) || math.IsNaN(pos.Lon) || pos.Lat < -90 || pos.Lat > 90 || pos.Lon < -180 || pos.Lon > 180 {
+		return
+	}
+	// rate/speed checks
+	if ps.Pos.Lat != 0 && ps.Pos.Lon != 0 {
+		if tick-ps.LastTick < int64(TICK_RATE/UPDATES_PER_SECOND) {
+			return
+		}
+		if distanceMeters(ps.Pos, pos) > 30 {
+			return
+		}
+	}
+	if !pointInPolygon(pos.Lat, pos.Lon, mapBounds) {
+		return
+	}
+
+	// compute old/new keys
+	w.playerMu.RLock()
+	oldKey, hadOld := w.playerCell[userID]
+	w.playerMu.RUnlock()
+	li, lj := cellIndices(pos.Lat, pos.Lon)
+	newKey := cellKey(li, lj)
+
+	// Determine lock order to avoid deadlocks
+	if hadOld {
+		if oldKey != newKey {
+			// Move between cells
+			newCell := w.ensureCellExists(ps.MatchID, newKey)
+			oldCell := w.ensureCellExists(ps.MatchID, oldKey)
+			var first, second *Cell
+			if oldKey < newKey {
+				first, second = oldCell, newCell
+			} else {
+				first, second = newCell, oldCell
+			}
+			// Lock in order
+			first.mu.Lock()
+			second.mu.Lock()
+			// remove from old
+			delete(oldCell.players, userID)
+			// add to new
+			newCell.players[userID] = struct{}{}
+			// unlock in reverse order
+			second.mu.Unlock()
+			first.mu.Unlock()
+		}
+	} else {
+		// Start from new cell
+		newCell := w.ensureCellExists(ps.MatchID, newKey)
+		newCell.mu.Lock()
+		// add to new
+		newCell.players[userID] = struct{}{}
+		newCell.mu.Unlock()
+	}
+	// finally update authoritative maps
+	w.playerMu.Lock()
+	ps.Pos = pos
+	ps.LastTick = tick
+	w.playerCell[userID] = newKey
+	w.playerMu.Unlock()
+
+	// Build update entry
+	up := update{UserID: userID, Lat: pos.Lat, Lon: pos.Lon}
+	neighbors := getNeighborCells(li, lj)
+	// Append to all neighboring cells' update buffers
+	for matchId := range 4 {
+		for _, nc := range neighbors {
+			nk := cellKey(nc[0], nc[1])
+			w.ensureMatchUpdates(matchId, nil, &nk, up)
+		}
+	}
+	// Also append to group-specific updates, allways contained within a single match
+	w.ensureMatchUpdates(ps.MatchID, &ps.GroupID, nil, up)
+}
+
+// Returns marshaled JSON for match updates and resets the buffer
+func (w *WorldEngine) FetchMatchUpdates(matchID int, cellKey *int64, groupID *int) ([]byte, error) {
+	w.updatesMu[matchID].Lock()
+	defer w.updatesMu[matchID].Unlock()
+
+	if groupID != nil {
+		gmap := w.groupMatchUpdates[matchID]
+		if gmap == nil {
+			return nil, nil
+		}
+		bufPtr := gmap[*groupID]
+		if bufPtr == nil || len(*bufPtr) == 0 {
+			return nil, nil
+		}
+		updates := *bufPtr
+		payload, err := json.Marshal(updates)
+		// recycle
+		putUpdateSlice(bufPtr)
+		delete(gmap, *groupID)
+
+		return payload, err
+	}
+
+	if cellKey != nil {
+		cmap := w.cellMatchUpdates[matchID]
+		if cmap == nil {
+			return nil, nil
+		}
+		bufPtr := cmap[*cellKey]
+		if bufPtr == nil || len(*bufPtr) == 0 {
+			return nil, nil
+		}
+		updates := *bufPtr
+		payload, err := json.Marshal(updates)
+		// recycle
+		putUpdateSlice(bufPtr)
+		delete(cmap, *cellKey)
+
+		return payload, err
+	}
+
+	return nil, nil
+}
+
+// Match implementation
 type GlobalMatch struct{}
 
 type Player struct {
@@ -77,347 +424,217 @@ type Player struct {
 	GroupName  string
 	Position   Position
 	Presence   runtime.Presence
-	lastUpdate int64 // unix ms
-	// other fields (lastBroadcastTime, etc) to be added
-}
-
-// Data map sent to clients about joining/connected players
-type UserData struct {
-	UserID    string `json:"user_id"`
-	Username  string `json:"username"`
-	GroupID   int    `json:"group_id"`
-	GroupName string `json:"group_name"`
-}
-
-// update structure for location updates
-type update struct {
-	UserID string  `json:"user_id"`
-	Lat    float64 `json:"lat"`
-	Lon    float64 `json:"lon"`
+	lastUpdate int64
 }
 
 type MatchState struct {
-	Debug       bool
-	Players     map[string]*Player          		// userID -> player
-	playersCell map[string][2]int           		// userID -> {latIndex, lonIndex}
-	cellPlayers map[int]map[int]map[string]struct{} // latIndex -> lonIndex -> userID
-	// batched updates for broadcasting every second
-	cellUpdates   map[int]map[int][]update
-	groupUpdates  map[int][]update
-	lastBroadcast int64 // unix ms
+	Debug         bool
+	Players       map[string]*Player
+	lastBroadcast int64
+	MatchID       int
 }
 
-func distanceMeters(a, b Position) float64 {
-	dLat := a.Lat - b.Lat
-	dLon := a.Lon - b.Lon
-	return math.Sqrt(dLat*dLat+dLon*dLon) * 111000 // meters approx
-}
-
-// Match lifecycle
 func (m *GlobalMatch) MatchInit(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, params map[string]interface{}) (interface{}, int, string) {
+	matchID := 0
+	if idx, ok := params["match_id"]; ok {
+		if idxi, ok2 := idx.(float64); ok2 {
+			matchID = int(idxi)
+		} else if idxi, ok3 := idx.(int); ok3 {
+			matchID = idxi
+		}
+	}
 	state := &MatchState{
 		Debug:         true,
 		Players:       make(map[string]*Player),
-		playersCell:   make(map[string][2]int),
-		cellPlayers:   make(map[int]map[int]map[string]struct{}),
-		cellUpdates:   make(map[int]map[int][]update),
-		groupUpdates:  make(map[int][]update),
 		lastBroadcast: 0,
+		MatchID:       matchID,
 	}
-	label := "global_match"
-	logger.Info("Initialized match global_match.")
-	//expected ~40 updates per tick = ~800 updates per second
+
+	label := fmt.Sprintf("global_match_%d", matchID)
+	logger.Info("Initialized " + label)
+	_ = GetWorldEngine()
 	return state, TICK_RATE, label
 }
 
 func (m *GlobalMatch) MatchJoinAttempt(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presence runtime.Presence, metadata map[string]string) (interface{}, bool, string) {
-	// Allow all joins by default
 	return state, true, ""
 }
 
 func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
 	s := state.(*MatchState)
-
-	existing := make([]UserData, 0, len(s.Players))
-	for _, pl := range s.Players {
-		// Build list of existing players
-		existing = append(existing, UserData{
-			UserID:    pl.ID,
-			Username:  pl.Username,
-			GroupID:   pl.GroupID,
-			GroupName: pl.GroupName,
-		})
-	}
+	world := GetWorldEngine()
 
 	joins := make([]UserData, 0, len(presences))
 	for _, p := range presences {
-		userID := p.GetUserId()
-
-		// prevent accidental duplicates
-		if _, exists := s.Players[userID]; exists {
-			logger.Warn("Ignoring duplicate join for user: " + userID)
+		uid := p.GetUserId()
+		if _, exists := s.Players[uid]; exists {
+			logger.Warn("duplicate local join " + uid)
 			continue
 		}
-
 		username := p.GetUsername()
-		groupID := groupManager.userToGroup[userID]
+		groupID := groupManager.userToGroup[uid]
 		groupName := groupManager.groups[groupID].Name
-		s.Players[userID] = &Player{
-			ID:         userID,
+		s.Players[uid] = &Player{
+			ID:         uid,
 			Username:   username,
 			GroupID:    groupID,
 			GroupName:  groupName,
-			Position:   Position{Lat: 0, Lon: 0}, // not known yet
+			Position:   Position{Lat: 0, Lon: 0},
 			Presence:   p,
 			lastUpdate: 0,
 		}
-		joins = append(joins, UserData{
-			UserID:    userID,
+		joins = append(joins, UserData{UserID: uid, Username: username, GroupID: groupID, GroupName: groupName})
+
+		// register to world with zero position
+		ws := &PlayerState{
+			UserID:    uid,
 			Username:  username,
 			GroupID:   groupID,
 			GroupName: groupName,
-		})
-		// no cell assigned until first valid position update
-		logger.Info(fmt.Sprintf("%s joined.", p.GetUsername()))
+			Pos:       Position{Lat: 0, Lon: 0},
+			LastTick:  0,
+			MatchID:   s.MatchID,
+		}
+		world.AddPlayer(ws)
+		logger.Info(fmt.Sprintf("%s joined match %d", username, s.MatchID))
 	}
 
-	// notify joining players of existing players
-	if len(existing) > 0 {
-		payload, _ := json.Marshal(existing)
+	// Send global public user snapshot (all players across matches)
+	allUsers := world.FetchAllPublicUsers()
+	if len(allUsers) > 0 {
+		payload, _ := json.Marshal(allUsers)
+		// send only to joining presences
 		dispatcher.BroadcastMessage(10, payload, presences, nil, false)
 	}
 
-	// notify existing players of joining players
+	// Notify local players of joins
 	if len(joins) > 0 {
 		payload, _ := json.Marshal(joins)
-		dispatcher.BroadcastMessage(10, payload, nil, nil, false)
+		localPres := make([]runtime.Presence, 0, len(s.Players))
+		for _, pl := range s.Players {
+			localPres = append(localPres, pl.Presence)
+		}
+		if len(localPres) > 0 {
+			dispatcher.BroadcastMessage(10, payload, localPres, nil, false)
+		}
 	}
 	return s
 }
 
 func (m *GlobalMatch) MatchLeave(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, presences []runtime.Presence) interface{} {
 	s := state.(*MatchState)
+	world := GetWorldEngine()
+
 	for _, p := range presences {
 		uid := p.GetUserId()
-		// remove from nested cell map if present
-		if idx, ok := s.playersCell[uid]; ok {
-			li, lj := idx[0], idx[1]
-			if row, ok1 := s.cellPlayers[li]; ok1 {
-				if col, ok2 := row[lj]; ok2 {
-					delete(col, uid)
-				}
-			}
-			delete(s.playersCell, uid)
-		}
 		delete(s.Players, uid)
-		logger.Info(fmt.Sprintf("%s left.", p.GetUsername()))
+		world.RemovePlayer(uid)
+		logger.Info(fmt.Sprintf("%s left match %d", uid, s.MatchID))
 	}
 	return s
 }
 
-// movePlayer ensures the player is located in the correct nested cell maps
-func (s *MatchState) movePlayer(userID string, lat, lon float64) {
-	latIdx, lonIdx := cellIndices(lat, lon)
-
-	old, hadOld := s.playersCell[userID]
-
-	// If moved or new
-	if !hadOld || old[0] != latIdx || old[1] != lonIdx {
-		// Remove from old cell
-		if hadOld {
-			oi, oj := old[0], old[1]
-			if row, ok := s.cellPlayers[oi]; ok {
-				if col, ok2 := row[oj]; ok2 {
-					delete(col, userID)
-				}
-			}
-		}
-
-		// Add to new cell, creating nested maps as necessary
-		row, ok := s.cellPlayers[latIdx]
-		if !ok {
-			row = make(map[int]map[string]struct{})
-			s.cellPlayers[latIdx] = row
-		}
-		col, ok := row[lonIdx]
-		if !ok {
-			col = make(map[string]struct{})
-			row[lonIdx] = col
-		}
-		col[userID] = struct{}{}
-		s.playersCell[userID] = [2]int{latIdx, lonIdx}
-		return
-	}
-
-	// No movement across cells, ensure pointer is present
-	if row, ok := s.cellPlayers[latIdx]; ok {
-		if col, ok2 := row[lonIdx]; ok2 {
-			col[userID] = struct{}{}
-		} else {
-			ncol := make(map[string]struct{})
-			ncol[userID] = struct{}{}
-			row[lonIdx] = ncol
-		}
-	} else {
-		row := make(map[int]map[string]struct{})
-		col := make(map[string]struct{})
-		col[userID] = struct{}{}
-		row[lonIdx] = col
-		s.cellPlayers[latIdx] = row
-	}
-}
-
-// Process incoming position messages, validate and update internal state, then batch and send updates once per tick
 func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, messages []runtime.MatchData) interface{} {
-	s, ok := state.(*MatchState)
-	if !ok || s == nil {
-		logger.Error("Invalid match state")
-		return state
-	}
+	s := state.(*MatchState)
+	world := GetWorldEngine()
 
-	// Aggregated updates per tick
-	// Process incoming messages and populate buffers and spatial index
+	// Process client position updates (opcode == 1)
 	for _, msg := range messages {
 		if msg.GetOpCode() != 1 {
 			continue
 		}
 		userID := msg.GetUserId()
-		player, exists := s.Players[userID]
-		if !exists {
-			logger.Warn(fmt.Sprintf("Message from unknown player: %s", userID))
+		pl, ok := s.Players[userID]
+		if !ok {
 			continue
 		}
-
 		var newPos Position
 		if err := json.Unmarshal(msg.GetData(), &newPos); err != nil {
-			logger.Warn(fmt.Sprintf("Invalid pos payload from %s: %v", userID, err))
+			logger.Warn(fmt.Sprintf("invalid pos payload from %s: %v", userID, err))
 			continue
 		}
-
-		// Sanity checks
-		if math.IsNaN(newPos.Lat) || math.IsNaN(newPos.Lon) || newPos.Lat < -90 || newPos.Lat > 90 || newPos.Lon < -180 || newPos.Lon > 180 {
-			logger.Warn(fmt.Sprintf("Invalid pos values from %s: %+v", userID, newPos))
-			continue
-		}
-
-		// Validation checks
-		if player.Position.Lat != 0 || player.Position.Lon != 0 {
-			prev := player.Position
-			if tick-player.lastUpdate < int64(TICK_RATE/UPDATES_PER_SECOND) {
-				continue // skip if last update is too recent
-			}
-			dist := distanceMeters(prev, newPos)
-			if dist > 30 {
-				logger.Info(fmt.Sprintf("Invalid movement from %s: prev=%+v new=%+v dist=%.1fm", userID, prev, newPos, dist))
-				continue
-			}
-			if dist < 0.2 {
-				// skip negligible movement
-				continue
-			}
-		}
-		// Campus bounds check
-		if !pointInPolygon(newPos.Lat, newPos.Lon, mapBounds) {
-			logger.Info(fmt.Sprintf("Pos outside campus from %s: %+v", userID, newPos))
-			continue
-		}
-
-		// Accept update
-		player.Position = newPos
-		player.lastUpdate = tick
-		// Move player between nested cell maps
-		s.movePlayer(userID, newPos.Lat, newPos.Lon)
-		latIdx, lonIdx := cellIndices(newPos.Lat, newPos.Lon)
-		// append to cell updates
-		up := update{UserID: userID, Lat: newPos.Lat, Lon: newPos.Lon}
-		if _, ok := s.cellUpdates[latIdx]; !ok {
-			s.cellUpdates[latIdx] = make(map[int][]update)
-		}
-		groupId := player.GroupID
-		if _, ok := s.groupUpdates[groupId]; !ok {
-			s.groupUpdates[groupId] = make([]update, 0)
-		}
-		s.cellUpdates[latIdx][lonIdx] = append(s.cellUpdates[latIdx][lonIdx], up)
-		s.groupUpdates[groupId] = append(s.groupUpdates[groupId], up)
+		// forward to world for authoritative validation & routing
+		world.ProcessMovement(userID, newPos, tick)
+		// update local copy
+		pl.Position = newPos
+		pl.lastUpdate = tick
 	}
 
+	// Throttle broadcasts
 	if tick-s.lastBroadcast < int64(TICK_RATE/BROADCASTS_PER_SECOND) {
-		return s // broadcast at the rate of BROADCASTS_PER_SECOND
+		return s
 	}
 
-	// Broadcast proximity updates cell-by-cell
-	for latIdx, row := range s.cellUpdates {
-		for lonIdx, updates := range row {
-			// Serialize updates of THIS cell once
-			payload, err := json.Marshal(updates)
-			if err != nil {
-				logger.Warn("Marshal cell update failed: " + err.Error())
-				continue
-			}
-
-			// Iterate through 9 neighbor cells
-			presences := make([]runtime.Presence, 0, 100)
-			neighbors := getNeighborCells(latIdx, lonIdx)
-			for _, c := range neighbors {
-				ni, nj := c[0], c[1]
-				// Get presences from the neighbor cell
-				presMap, ok := s.cellPlayers[ni][nj]
-				if !ok || len(presMap) == 0 {
-					continue
-				}
-				// Append presences
-				for userID := range presMap {
-					presences = append(presences, s.Players[userID].Presence)
-				}
-			}
-			// Broadcast to players of that neighbor cell
-			dispatcher.BroadcastMessage(1, payload, presences, nil, false)
-			s.cellUpdates[latIdx][lonIdx] = updates[:0] // clear updates
-		}
-	}
-
-	// Broadcast group updates
-	for groupID, updates := range s.groupUpdates {
-		payload, err := json.Marshal(updates)
-		if err != nil {
-			logger.Warn("Marshal cell update failed: " + err.Error())
+	// Broadcast cell updates
+	world.cellsMu[s.MatchID].RLock()
+	cellMap := world.cells[s.MatchID] // cellKey -> *Cell
+	world.cellsMu[s.MatchID].RUnlock()
+	for ck, cell := range cellMap {
+		// Get batched updates for cell
+		payload, err := world.FetchMatchUpdates(s.MatchID, &ck, nil)
+		if err != nil || len(payload) == 0 {
 			continue
 		}
-		groupMembers := groupManager.groups[groupID].Members
-
-		// Build slice of presences
-		presences := make([]runtime.Presence, 0, len(groupMembers))
-		for memberID := range groupMembers {
-			if pl, ok := s.Players[memberID]; ok {
-				presences = append(presences, pl.Presence)
+		// Collect presences for players inside this cell
+		cell.mu.Lock()
+		pres := make([]runtime.Presence, 0, len(cell.players))
+		for uid := range cell.players {
+			if p, ok := s.Players[uid]; ok {
+				pres = append(pres, p.Presence)
 			}
 		}
-		if len(presences) > 0 {
-			dispatcher.BroadcastMessage(2, payload, presences, nil, false)
+		cell.mu.Unlock()
+		if len(pres) > 0 {
+			dispatcher.BroadcastMessage(1, payload, pres, nil, false)
 		}
-		s.groupUpdates[groupID] = updates[:0] // clear updates
 	}
-	// Update last broadcast tick
+
+	// Broadcast group updates for this match
+	groupMap := world.groupMatchUpdates[s.MatchID]
+	for groupID := range groupMap {
+		payload, err := world.FetchMatchUpdates(s.MatchID, nil, &groupID)
+		if err != nil || len(payload) == 0 {
+			continue
+		}
+		pres := make([]runtime.Presence, 0)
+		for _, p := range s.Players {
+			if p.GroupID == groupID {
+				pres = append(pres, p.Presence)
+			}
+		}
+		if len(pres) > 0 {
+			dispatcher.BroadcastMessage(2, payload, pres, nil, false)
+		}
+	}
+
 	s.lastBroadcast = tick
 	return s
 }
 
 func (m *GlobalMatch) MatchTerminate(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, graceSeconds int) interface{} {
-	// Force this match to never terminate
-	logger.Info("Global match attempted to terminate, ignoring.")
+	// allow termination
 	return nil
 }
 
 func (m *GlobalMatch) MatchSignal(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, dispatcher runtime.MatchDispatcher, tick int64, state interface{}, data string) (interface{}, string) {
-	logger.Info("Signal received: %s", data)
 	return state, ""
 }
 
-// Factory
 func NewGlobalMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule) (runtime.Match, error) {
 	return &GlobalMatch{}, nil
 }
 
-func rpcJoinGlobalMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	return globalMatchID, nil
+func rpcGetGlobalMatch(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	userID := ctx.Value(runtime.RUNTIME_CTX_USER_ID).(string)
+	groupID, ok := groupManager.userToGroup[userID]
+	if !ok {
+		return "", runtime.NewError("user has no group assigned", 3)
+	}
+	groupsPerMatch := MaxGroups / NumMatches
+
+	matchIndex := int(groupID / groupsPerMatch)
+
+	mm := GetMatchManager()
+	matchID := mm.matchIDs[matchIndex]
+	return matchID, nil
 }

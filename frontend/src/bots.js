@@ -66,7 +66,14 @@ async function createBot(i) {
   let matchID = null;
   if (!socket) return;
   try {
-    const res = await socket.rpc("join_global_match");
+    const groupName = await socket.rpc("join_group");
+    console.log(`Bot ${i} joined group:`, groupName.payload);
+  } catch (e) {
+    console.error(`Bot ${i} failed joining group:`, e);
+    return;
+  }
+  try {
+    const res = await socket.rpc("get_match");
     if (!res) return;
     matchID = res.payload;
     console.log(`Bot ${i} joining match:`, matchID);

@@ -479,7 +479,10 @@ export async function initMap(mapDivId) {
   setupSocketHandlers();
 
   if (!socket) return;
-  const res = await socket.rpc("join_global_match");
+  const groupName = await socket.rpc("join_group");
+  myGroup.name = groupName.payload;
+  console.log("Joined group:", groupName.payload);
+  const res = await socket.rpc("get_match");
   if (!res) return;
   matchID = res.payload;
   console.log("Joining match:", matchID);
