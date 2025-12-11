@@ -115,24 +115,25 @@ type PlayerState struct {
 	Pos       Position
 	LastTick  int64
 	MatchID   int
+	playerMu  sync.RWMutex
 }
 
 // WorldEngine (singleton)
 type WorldEngine struct {
 	// Player maps
-	playerMu    sync.RWMutex
+	playersMu    sync.RWMutex
 	playerState map[string]*PlayerState // userID -> state
 	playerCell  map[string]int64        // userID -> cellKey
 
 	// Cell maps divided by match
-	cellsMu map[int]*sync.RWMutex
+	cellsMu []sync.RWMutex
 	cells   map[int]map[int64]*Cell // matchID -> cellKey -> Cell
 
 	// Per-match buffered updates
-	updatesMu         map[int]*sync.Mutex
+	updatesMu         []sync.Mutex
 	cellMatchUpdates  map[int]map[int64]*[]update // matchID -> cellKey -> pointer to slice (pooled)
 	groupMatchUpdates map[int]map[int]*[]update   // matchID -> groupID -> pointer to slice (pooled)
-	joinUpdates 	  map[int]*[]UserData // per-match join events (pooled)
+	joinUpdates       map[int]*[]UserData         // per-match join events (pooled)
 
 }
 
@@ -149,14 +150,12 @@ func GetWorldEngine() *WorldEngine {
 			cells:             make(map[int]map[int64]*Cell),
 			cellMatchUpdates:  make(map[int]map[int64]*[]update),
 			groupMatchUpdates: make(map[int]map[int]*[]update),
-			joinUpdates:	   make(map[int]*[]UserData),
-			cellsMu:           make(map[int]*sync.RWMutex),
-			updatesMu:         make(map[int]*sync.Mutex),
+			joinUpdates:       make(map[int]*[]UserData),
 		}
 		for matchId := range NumMatches {
 			// Per-match mutex
-			world.updatesMu[matchId] = &sync.Mutex{}
-			world.cellsMu[matchId] = &sync.RWMutex{}
+			world.updatesMu[matchId] = sync.Mutex{}
+			world.cellsMu[matchId] = sync.RWMutex{}
 			// Initialize maps
 			world.cells[matchId] = make(map[int64]*Cell)
 			world.cellMatchUpdates[matchId] = make(map[int64]*[]update)
@@ -230,9 +229,9 @@ func (w *WorldEngine) ensureMatchUpdates(matchId int, groupId *int, cellId *int6
 
 // AddPlayer registers player to world, cells remain persistent and are created lazily and retained
 func (w *WorldEngine) AddPlayer(p *PlayerState) {
-	w.playerMu.Lock()
+	w.playersMu.Lock()
 	w.playerState[p.UserID] = p
-	w.playerMu.Unlock()
+	w.playersMu.Unlock()
 
 	if p.Pos.Lat != 0 && p.Pos.Lon != 0 {
 		li, lj := cellIndices(p.Pos.Lat, p.Pos.Lon)
@@ -243,16 +242,16 @@ func (w *WorldEngine) AddPlayer(p *PlayerState) {
 		c.players[p.UserID] = struct{}{}
 		c.mu.Unlock()
 
-		w.playerMu.Lock()
+		w.playersMu.Lock()
 		w.playerCell[p.UserID] = ck
-		w.playerMu.Unlock()
+		w.playersMu.Unlock()
 	}
 }
 
 // RemovePlayer deletes player from world
 func (w *WorldEngine) RemovePlayer(userID string) {
 	// remove from player maps safely
-	w.playerMu.Lock()
+	w.playersMu.Lock()
 	ps, hadState := w.playerState[userID]
 	ck, hadCell := w.playerCell[userID]
 	if hadState {
@@ -261,7 +260,7 @@ func (w *WorldEngine) RemovePlayer(userID string) {
 	if hadCell {
 		delete(w.playerCell, userID)
 	}
-	w.playerMu.Unlock()
+	w.playersMu.Unlock()
 
 	if hadCell && hadState {
 		// Remove from cell set
@@ -274,8 +273,8 @@ func (w *WorldEngine) RemovePlayer(userID string) {
 
 // FetchAllPublicUsers returns UserData for all known players, used for initial global snapshot on join
 func (w *WorldEngine) FetchAllPublicUsers() []UserData {
-	w.playerMu.RLock()
-	defer w.playerMu.RUnlock()
+	w.playersMu.RLock()
+	defer w.playersMu.RUnlock()
 	out := make([]UserData, 0, len(w.playerState))
 	for _, ps := range w.playerState {
 		out = append(out, UserData{
@@ -290,10 +289,11 @@ func (w *WorldEngine) FetchAllPublicUsers() []UserData {
 
 // Validate, move and append updates across matches
 func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
+	ps := w.playerState[userID]
 	// quick read lock to fetch player state pointer
-	w.playerMu.RLock()
+	ps.playerMu.RLock()
 	ps, ok := w.playerState[userID]
-	w.playerMu.RUnlock()
+	ps.playerMu.RUnlock()
 	if !ok {
 		return
 	}
@@ -316,9 +316,9 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 	}
 
 	// compute old/new keys
-	w.playerMu.RLock()
+	ps.playerMu.RLock()
 	oldKey, hadOld := w.playerCell[userID]
-	w.playerMu.RUnlock()
+	ps.playerMu.RUnlock()
 	li, lj := cellIndices(pos.Lat, pos.Lon)
 	newKey := cellKey(li, lj)
 
@@ -354,11 +354,11 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 		newCell.mu.Unlock()
 	}
 	// finally update authoritative maps
-	w.playerMu.Lock()
+	ps.playerMu.Lock()
 	ps.Pos = pos
 	ps.LastTick = tick
 	w.playerCell[userID] = newKey
-	w.playerMu.Unlock()
+	ps.playerMu.Unlock()
 
 	// Build update entry
 	up := update{UserID: userID, Lat: pos.Lat, Lon: pos.Lon}
@@ -377,44 +377,44 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 // Returns marshaled JSON for match updates and resets the buffer
 func (w *WorldEngine) FetchMatchUpdates(matchID int, cellKey *int64, groupID *int) ([]byte, error) {
 	w.updatesMu[matchID].Lock()
-	defer w.updatesMu[matchID].Unlock()
 
 	if groupID != nil {
 		gmap := w.groupMatchUpdates[matchID]
 		if gmap == nil {
+			w.updatesMu[matchID].Unlock()
 			return nil, nil
 		}
 		bufPtr := gmap[*groupID]
 		if bufPtr == nil || len(*bufPtr) == 0 {
+			w.updatesMu[matchID].Unlock()
 			return nil, nil
 		}
+		delete(gmap, *groupID)
+		w.updatesMu[matchID].Unlock()
 		updates := *bufPtr
 		payload, err := json.Marshal(updates)
-		// recycle
 		putUpdateSlice(bufPtr)
-		delete(gmap, *groupID)
-
 		return payload, err
 	}
 
 	if cellKey != nil {
 		cmap := w.cellMatchUpdates[matchID]
 		if cmap == nil {
+			w.updatesMu[matchID].Unlock()
 			return nil, nil
 		}
 		bufPtr := cmap[*cellKey]
 		if bufPtr == nil || len(*bufPtr) == 0 {
+			w.updatesMu[matchID].Unlock()
 			return nil, nil
 		}
+		delete(cmap, *cellKey)
+		w.updatesMu[matchID].Unlock()
 		updates := *bufPtr
 		payload, err := json.Marshal(updates)
-		// recycle
 		putUpdateSlice(bufPtr)
-		delete(cmap, *cellKey)
-
 		return payload, err
 	}
-
 	return nil, nil
 }
 
@@ -422,13 +422,9 @@ func (w *WorldEngine) FetchMatchUpdates(matchID int, cellKey *int64, groupID *in
 type GlobalMatch struct{}
 
 type Player struct {
-	ID         string
-	Username   string
-	GroupID    int
-	GroupName  string
-	Position   Position
-	Presence   runtime.Presence
-	lastUpdate int64
+	ID       string
+	GroupID  int
+	Presence runtime.Presence
 }
 
 type MatchState struct {
@@ -479,13 +475,9 @@ func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *
 		groupID := groupManager.userToGroup[uid]
 		groupName := groupManager.groups[groupID].Name
 		s.Players[uid] = &Player{
-			ID:         uid,
-			Username:   username,
-			GroupID:    groupID,
-			GroupName:  groupName,
-			Position:   Position{Lat: 0, Lon: 0},
-			Presence:   p,
-			lastUpdate: 0,
+			ID:       uid,
+			GroupID:  groupID,
+			Presence: p,
 		}
 		joins = append(joins, UserData{UserID: uid, Username: username, GroupID: groupID, GroupName: groupName})
 
@@ -560,10 +552,6 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 			continue
 		}
 		userID := msg.GetUserId()
-		pl, ok := s.Players[userID]
-		if !ok {
-			continue
-		}
 		var newPos Position
 		if err := json.Unmarshal(msg.GetData(), &newPos); err != nil {
 			logger.Warn(fmt.Sprintf("invalid pos payload from %s: %v", userID, err))
@@ -571,9 +559,6 @@ func (m *GlobalMatch) MatchLoop(ctx context.Context, logger runtime.Logger, db *
 		}
 		// forward to world for authoritative validation & routing
 		world.ProcessMovement(userID, newPos, tick)
-		// update local copy
-		pl.Position = newPos
-		pl.lastUpdate = tick
 	}
 
 	// Throttle broadcasts

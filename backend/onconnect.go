@@ -16,19 +16,18 @@ import (
 	"math"
 	"sync"
 
-	//"github.com/heroiclabs/nakama-common/api"
 	"github.com/heroiclabs/nakama-common/runtime"
 )
 
 const (
 	GroupNamePrefix = "Group"
 	MaxGroups       = 80
-	NumMatches	  	= 4
+	NumMatches      = 4
 	AdminID         = "5c6f4519-0ba6-4fd2-b26d-f3639c3bf1e3"
 )
 
 // GroupManager
-type GroupInfo struct {
+type Group struct {
 	ID      string
 	Name    string
 	Members map[string]struct{} // set of userIDs
@@ -37,7 +36,7 @@ type GroupInfo struct {
 type GroupManager struct {
 	nk           runtime.NakamaModule
 	logger       runtime.Logger
-	groups       []*GroupInfo
+	groups       []*Group
 	userToGroup  map[string]int // userID -> group index in groups slice
 	nextTieIndex int            // tie-breaker for equal-size groups
 	mu           sync.RWMutex   // Read/write lock for concurrency
@@ -49,7 +48,7 @@ func NewGroupManager(nk runtime.NakamaModule, logger runtime.Logger, maxGroups i
 	return &GroupManager{
 		nk:           nk,
 		logger:       logger,
-		groups:       make([]*GroupInfo, 0, maxGroups),
+		groups:       make([]*Group, 0, maxGroups),
 		userToGroup:  make(map[string]int),
 		nextTieIndex: 0,
 		maxGroups:    maxGroups,
@@ -98,9 +97,9 @@ func (gm *GroupManager) Init(ctx context.Context) error {
 	}
 
 	// build local groups slice
-	gm.groups = make([]*GroupInfo, 0, gm.maxGroups)
+	gm.groups = make([]*Group, 0, gm.maxGroups)
 	for _, g := range groups {
-		gi := &GroupInfo{
+		gi := &Group{
 			ID:      g.Id,
 			Name:    g.Name,
 			Members: make(map[string]struct{}),
@@ -128,12 +127,12 @@ func (gm *GroupManager) Init(ctx context.Context) error {
 // GetNextGroup finds index of the group to add a user to
 // Pick group with minimum size and tie-break via nextTieIndex to create round-robin across equals
 func (gm *GroupManager) GetNextGroup() int {
-    n := len(gm.groups)
-    start := gm.nextTieIndex
+	n := len(gm.groups)
+	start := gm.nextTieIndex
 
-    if n == 0 {
-        return -1
-    }
+	if n == 0 {
+		return -1
+	}
 	bestIdx := 0
 	bestSize := math.MaxInt32
 
@@ -153,37 +152,37 @@ func (gm *GroupManager) GetNextGroup() int {
 
 // Assigns a user to a group (Nakama + Cache)
 func (gm *GroupManager) AssignUser(ctx context.Context, userID string) (string, error) {
-    // Try to reserve group index under lock
-    gm.mu.Lock()
-    if idx, ok := gm.userToGroup[userID]; ok {
-        name := gm.groups[idx].Name
-        gm.mu.Unlock()
-        return name, nil
-    }
+	// Try to reserve group index under lock
+	gm.mu.Lock()
+	if idx, ok := gm.userToGroup[userID]; ok {
+		name := gm.groups[idx].Name
+		gm.mu.Unlock()
+		return name, nil
+	}
 
-    idx := gm.GetNextGroup()
-    if idx < 0 || idx >= len(gm.groups) {
-        gm.mu.Unlock()
-        return "", fmt.Errorf("no groups available")
-    }
-    group := gm.groups[idx]
-    gm.mu.Unlock()
-    // Perform external call (no gm lock)
-    if err := gm.nk.GroupUsersAdd(ctx, "", group.ID, []string{userID}); err != nil {
-        return "", fmt.Errorf("GroupUsersAdd failed: %w", err)
-    }
+	idx := gm.GetNextGroup()
+	if idx < 0 || idx >= len(gm.groups) {
+		gm.mu.Unlock()
+		return "", fmt.Errorf("no groups available")
+	}
+	group := gm.groups[idx]
+	gm.mu.Unlock()
+	// Perform external call
+	if err := gm.nk.GroupUsersAdd(ctx, "", group.ID, []string{userID}); err != nil {
+		return "", fmt.Errorf("GroupUsersAdd failed: %w", err)
+	}
 
-    // After external success, acquire lock and update cache
-    gm.mu.Lock()
-    defer gm.mu.Unlock()
-    if existingIdx, ok := gm.userToGroup[userID]; ok {
-        // someone else already assigned concurrently, prefer existing assignment
-        return gm.groups[existingIdx].Name, nil
-    }
-    // commit to cache
-    group.Members[userID] = struct{}{}
-    gm.userToGroup[userID] = idx
-    return group.Name, nil
+	// After external success, acquire lock and update cache
+	gm.mu.Lock()
+	defer gm.mu.Unlock()
+	if existingIdx, ok := gm.userToGroup[userID]; ok {
+		// someone else already assigned concurrently, prefer existing assignment
+		return gm.groups[existingIdx].Name, nil
+	}
+	// commit to cache
+	group.Members[userID] = struct{}{}
+	gm.userToGroup[userID] = idx
+	return group.Name, nil
 }
 
 // RemoveUser removes a user from their group, both in Nakama and cache (unused right now)
@@ -212,9 +211,9 @@ func (gm *GroupManager) GetUserGroup(nk runtime.NakamaModule, ctx context.Contex
 	gm.mu.RLock()
 	if idx, ok := gm.userToGroup[userID]; ok && idx < len(gm.groups) {
 		id := gm.groups[idx].ID
-        name := gm.groups[idx].Name
-        gm.mu.RUnlock()
-        return id, name, true
+		name := gm.groups[idx].Name
+		gm.mu.RUnlock()
+		return id, name, true
 	}
 	gm.mu.RUnlock()
 
@@ -278,7 +277,7 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	if err := initializer.RegisterMatch("global_match", NewGlobalMatch); err != nil {
 		return err
 	}
-	
+
 	// create persistent matches
 	mm := GetMatchManager()
 
@@ -310,6 +309,10 @@ func InitModule(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runti
 	}
 
 	if err := InitContentSync(ctx, logger, db, nk, initializer); err != nil {
+		return err
+	}
+
+	if err := InitContent(ctx, logger, db, nk, initializer); err != nil {
 		return err
 	}
 

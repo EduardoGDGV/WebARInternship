@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/heroiclabs/nakama-common/runtime"
@@ -89,6 +90,64 @@ type WPIncoming struct {
 	Content json.RawMessage `json:"content,omitempty"` // already-shaped content
 }
 
+// ContentCache holds parsed items coming from WordPress (storage).
+type ContentCache struct {
+	muEvents    sync.RWMutex
+    muCards     sync.RWMutex
+    muItems     sync.RWMutex
+    muQuizzes   sync.RWMutex
+    muAssets2D  sync.RWMutex
+	Events      map[int]*Event
+	Cards       map[int]*Card
+	Items       map[int]*Item
+	Quizzes     map[int]*Quiz
+	Assets2D    map[int]*Asset2D
+}
+
+var (
+	contentOnce  sync.Once
+	contentCache *ContentCache
+)
+
+func GetContentCache() *ContentCache {
+	contentOnce.Do(func() {
+		contentCache = &ContentCache{
+			Events:    make(map[int]*Event),
+			Cards:     make(map[int]*Card),
+			Items:     make(map[int]*Item),
+			Quizzes:   make(map[int]*Quiz),
+			Assets2D:  make(map[int]*Asset2D),
+		}
+	})
+	return contentCache
+}
+
+// DeleteFromCache removes an object (called when status == "trash")
+func (c *ContentCache) DeleteFromCache(typ string, id int) {
+	switch typ {
+	case "event":
+		c.muEvents.Lock()
+		delete(c.Events, id)
+		c.muEvents.Unlock()
+	case "card":
+		c.muCards.Lock()
+		delete(c.Cards, id)
+		c.muCards.Unlock()
+	case "item":
+		c.muItems.Lock()
+		delete(c.Items, id)
+		c.muItems.Unlock()
+	case "quiz":
+		c.muQuizzes.Lock()
+		delete(c.Quizzes, id)
+		c.muQuizzes.Unlock()
+	case "asset2d":
+		c.muAssets2D.Lock()
+		delete(c.Assets2D, id)
+		c.muAssets2D.Unlock()
+	}
+}
+
 // HTTP client / WP fetch
 var httpClient = &http.Client{Timeout: httpTimeout}
 
@@ -135,6 +194,18 @@ func parseFloatV(v any) (float64, error) {
 	}
 }
 
+func parseInt(v any) (int, error) {
+    switch x := v.(type) {
+	case int:
+		return x, nil
+    case float64:
+        return int(x), nil
+    case string:
+        return strconv.Atoi(x)
+    }
+    return 0, fmt.Errorf("invalid int: %v", v)
+}
+
 // parseIntArray converts []any to []int (skips non-numeric)
 func parseIntArray(arr []any) []int {
 	out := []int{}
@@ -175,9 +246,14 @@ func fetchPostsForType(logger runtime.Logger, postType string) ([]map[string]any
 
 // Convert WP 'event' post
 func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error) {
-	idf := int(post["id"].(float64))
-	var title string
+	var idf int
+	if id, ok := post["id"]; ok {
+		if i, err := parseInt(id); err == nil {
+			id = i
+		}
+	}
 
+	var title string
 	switch t := post["title"].(type) {
 	case string:
 		title = t
@@ -230,9 +306,14 @@ func buildEventFromWP(logger runtime.Logger, post map[string]any) (Event, error)
 }
 
 func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, error) {
-	idf := int(post["id"].(float64))
-	var title string
+	var idf int
+	if id, ok := post["id"]; ok {
+		if i, err := parseInt(id); err == nil {
+			id = i
+		}
+	}
 
+	var title string
 	switch t := post["title"].(type) {
 	case string:
 		title = t
@@ -260,9 +341,14 @@ func buildAsset2DFromWP(logger runtime.Logger, post map[string]any) (Asset2D, er
 }
 
 func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
-	idf := int(post["id"].(float64))
-	var title string
+	var idf int
+	if id, ok := post["id"]; ok {
+		if i, err := parseInt(id); err == nil {
+			id = i
+		}
+	}
 
+	var title string
 	switch t := post["title"].(type) {
 	case string:
 		title = t
@@ -298,9 +384,14 @@ func buildCardFromWP(logger runtime.Logger, post map[string]any) (Card, error) {
 }
 
 func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
-	idf := int(post["id"].(float64))
-	var title string
+	var idf int
+	if id, ok := post["id"]; ok {
+		if i, err := parseInt(id); err == nil {
+			id = i
+		}
+	}
 
+	var title string
 	switch t := post["title"].(type) {
 	case string:
 		title = t
@@ -331,9 +422,14 @@ func buildItemFromWP(logger runtime.Logger, post map[string]any) (Item, error) {
 }
 
 func buildQuizFromWP(logger runtime.Logger, post map[string]any) (Quiz, error) {
-	idf := int(post["id"].(float64))
-	var title string
+	var idf int
+	if id, ok := post["id"]; ok {
+		if i, err := parseInt(id); err == nil {
+			id = i
+		}
+	}
 
+	var title string
 	switch t := post["title"].(type) {
 	case string:
 		title = t
@@ -419,6 +515,7 @@ func notifyAll(ctx context.Context, nk runtime.NakamaModule, event string, paylo
 
 // wp_push_content
 func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
+	cache := GetContentCache()
 	// Accept either JSON object matching WPIncoming or raw map
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
@@ -439,8 +536,15 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 		return "", fmt.Errorf("missing type")
 	}
 
-	id := int(raw["id"].(float64))
-	if id == 0 {
+	var id int
+	if v, ok := raw["id"]; ok {
+		if i, err := parseInt(v); err == nil {
+			id = i
+		} else {
+			logger.Error("Payload missing or invalid 'id'")
+			return "", fmt.Errorf("missing id")
+		}
+	} else {
 		logger.Error("Payload missing or invalid 'id'")
 		return "", fmt.Errorf("missing id")
 	}
@@ -462,6 +566,7 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage delete failed: %v", err)
 			// continue to notify anyway
 		}
+		cache.DeleteFromCache(typeVal, id)
 		notifyAll(ctx, nk, "delete", map[string]any{"type": typeVal, "id": id})
 		logger.Info("Deleted %s %d", typeVal, id)
 		return `{"success":true}`, nil
@@ -488,6 +593,10 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
+		// update cache
+		cache.muEvents.Lock()
+		cache.Events[ev.ID] = &ev
+		cache.muEvents.Unlock()
 		notifyAll(ctx, nk, "update", ev)
 		logger.Info("Stored event %d", ev.ID)
 	case "asset2d":
@@ -500,6 +609,10 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
+		// update cache
+		cache.muAssets2D.Lock()
+		cache.Assets2D[as.ID] = &as
+		cache.muAssets2D.Unlock()
 		//notifyAll(ctx, nk, "update", as)
 		logger.Info("Stored asset2d %d", as.ID)
 	case "card":
@@ -512,6 +625,10 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
+		// update cache
+		cache.muCards.Lock()
+		cache.Cards[ca.ID] = &ca
+		cache.muCards.Unlock()
 		//notifyAll(ctx, nk, "update", ca)
 		logger.Info("Stored card %d", ca.ID)
 	case "item":
@@ -524,6 +641,10 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
+		// update cache
+		cache.muItems.Lock()
+		cache.Items[it.ID] = &it
+		cache.muItems.Unlock()
 		//notifyAll(ctx, nk, "update", it)
 		logger.Info("Stored item %d", it.ID)
 	case "quiz":
@@ -536,6 +657,10 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 			logger.Error("storage write failed: %v", err)
 			return "", err
 		}
+		// update cache
+		cache.muQuizzes.Lock()
+		cache.Quizzes[qz.ID] = &qz
+		cache.muQuizzes.Unlock()
 		//notifyAll(ctx, nk, "update", qz)
 		logger.Info("Stored quiz %d", qz.ID)
 	default:
@@ -546,55 +671,13 @@ func rpcWpPushContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk
 	return `{"success":true}`, nil
 }
 
-// Client RPC to get content
-// payload JSON optionally: {"type":"event"} or empty for all
-func rpcGetContent(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, payload string) (string, error) {
-	// parse optional filter
-	var filter map[string]any
-	if payload != "" {
-		_ = json.Unmarshal([]byte(payload), &filter)
-	}
-	var requestedType string
-	if filter != nil {
-		if t, ok := filter["type"].(string); ok {
-			requestedType = t
-		}
-	}
-
-	results := []map[string]any{}
-	// iterate collections
-	for t, coll := range collectionByType {
-		if requestedType != "" && requestedType != t {
-			continue
-		}
-		objects, _, err := nk.StorageList(ctx, "", "", coll, 1000, "")
-		if err != nil {
-			logger.Error("storage list failed for %s: %v", coll, err)
-			continue
-		}
-		for _, obj := range objects {
-			// obj.Value is JSON string
-			var m map[string]any
-			if err := json.Unmarshal([]byte(obj.Value), &m); err != nil {
-				// if cannot parse, skip
-				logger.Error("storage unmarshal failed: %v", err)
-				continue
-			}
-			results = append(results, m)
-		}
-	}
-	resB, _ := json.Marshal(results)
-	return string(resB), nil
-}
-
 // Init module
 func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk runtime.NakamaModule, initializer runtime.Initializer) error {
+	// Initialize cache
+	cache := GetContentCache()
+	
 	// Register central RPC used by WP notifier
 	if err := initializer.RegisterRpc("wp_push_content", rpcWpPushContent); err != nil {
-		return err
-	}
-	// Register client-facing fetch RPC
-	if err := initializer.RegisterRpc("get_content", rpcGetContent); err != nil {
 		return err
 	}
 
@@ -622,7 +705,18 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 		writes := []*runtime.StorageWrite{}
 		for _, p := range posts {
 			logger.Info("Full post payload: %+v", p)
-			idf := int(p["id"].(float64))
+			var idf int
+			if v, ok := p["id"]; ok {
+				if i, err := parseInt(v); err == nil {
+					idf = i
+				} else {
+					logger.Error("Payload missing or invalid 'id'")
+					return fmt.Errorf("missing id")
+				}
+			} else {
+				logger.Error("Payload missing or invalid 'id'")
+				return fmt.Errorf("missing id")
+			}
 			var key = storageKeyFor(idf)
 			switch t {
 			case "event":
@@ -633,6 +727,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 					continue
 				}
 				b, _ := json.Marshal(ev)
+				// update cache
+				cache.muEvents.Lock()
+				cache.Events[ev.ID] = &ev
+				cache.muEvents.Unlock()
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			case "asset2d":
 				logger.Info("Building asset2d for initial fetch")
@@ -642,6 +740,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 					continue
 				}
 				b, _ := json.Marshal(as)
+				// update cache
+				cache.muAssets2D.Lock()
+				cache.Assets2D[as.ID] = &as
+				cache.muAssets2D.Unlock()
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			case "card":
 				logger.Info("Building card for initial fetch")
@@ -651,6 +753,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 					continue
 				}
 				b, _ := json.Marshal(ca)
+				// update cache
+				cache.muCards.Lock()
+				cache.Cards[ca.ID] = &ca
+				cache.muCards.Unlock()
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			case "item":
 				logger.Info("Building item for initial fetch")
@@ -660,6 +766,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 					continue
 				}
 				b, _ := json.Marshal(it)
+				// update cache
+				cache.muItems.Lock()
+				cache.Items[it.ID] = &it
+				cache.muItems.Unlock()
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			case "quiz":
 				logger.Info("Building quiz for initial fetch")
@@ -669,6 +779,10 @@ func InitContentSync(ctx context.Context, logger runtime.Logger, db *sql.DB, nk 
 					continue
 				}
 				b, _ := json.Marshal(qz)
+				// update cache
+				cache.muQuizzes.Lock()
+				cache.Quizzes[qz.ID] = &qz
+				cache.muQuizzes.Unlock()
 				writes = append(writes, &runtime.StorageWrite{Collection: coll, Key: key, UserID: "", Value: string(b)})
 			}
 		}
