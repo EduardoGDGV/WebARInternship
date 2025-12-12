@@ -115,7 +115,7 @@ type PlayerState struct {
 	Pos       Position
 	LastTick  int64
 	MatchID   int
-	playerMu  sync.RWMutex
+	//playerMu  sync.RWMutex
 }
 
 // WorldEngine (singleton)
@@ -151,11 +151,10 @@ func GetWorldEngine() *WorldEngine {
 			cellMatchUpdates:  make(map[int]map[int64]*[]update),
 			groupMatchUpdates: make(map[int]map[int]*[]update),
 			joinUpdates:       make(map[int]*[]UserData),
+			cellsMu:           make([]sync.RWMutex, NumMatches),
+            updatesMu:         make([]sync.Mutex, NumMatches),
 		}
 		for matchId := range NumMatches {
-			// Per-match mutex
-			world.updatesMu[matchId] = sync.Mutex{}
-			world.cellsMu[matchId] = sync.RWMutex{}
 			// Initialize maps
 			world.cells[matchId] = make(map[int64]*Cell)
 			world.cellMatchUpdates[matchId] = make(map[int64]*[]update)
@@ -289,11 +288,10 @@ func (w *WorldEngine) FetchAllPublicUsers() []UserData {
 
 // Validate, move and append updates across matches
 func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
-	ps := w.playerState[userID]
 	// quick read lock to fetch player state pointer
-	ps.playerMu.RLock()
+	w.playersMu.RLock()
 	ps, ok := w.playerState[userID]
-	ps.playerMu.RUnlock()
+	w.playersMu.RUnlock()
 	if !ok {
 		return
 	}
@@ -316,9 +314,11 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 	}
 
 	// compute old/new keys
-	ps.playerMu.RLock()
+	//ps.playerMu.RLock()
+	w.playersMu.RLock()
 	oldKey, hadOld := w.playerCell[userID]
-	ps.playerMu.RUnlock()
+	w.playersMu.RUnlock()
+	//ps.playerMu.RUnlock()
 	li, lj := cellIndices(pos.Lat, pos.Lon)
 	newKey := cellKey(li, lj)
 
@@ -354,11 +354,13 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 		newCell.mu.Unlock()
 	}
 	// finally update authoritative maps
-	ps.playerMu.Lock()
+	//ps.playerMu.Lock()
+	w.playersMu.Lock()
 	ps.Pos = pos
 	ps.LastTick = tick
 	w.playerCell[userID] = newKey
-	ps.playerMu.Unlock()
+	w.playersMu.Unlock()
+	//ps.playerMu.Unlock()
 
 	// Build update entry
 	up := update{UserID: userID, Lat: pos.Lat, Lon: pos.Lon}
