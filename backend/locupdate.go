@@ -113,17 +113,16 @@ type PlayerState struct {
 	GroupID   int
 	GroupName string
 	Pos       Position
+	CellKey   int64
 	LastTick  int64
 	MatchID   int
-	//playerMu  sync.RWMutex
+	playerMu  sync.RWMutex
 }
 
 // WorldEngine (singleton)
 type WorldEngine struct {
-	// Player maps
-	playersMu    sync.RWMutex
-	playerState map[string]*PlayerState // userID -> state
-	playerCell  map[string]int64        // userID -> cellKey
+	// Concurrent player states map
+	playerState sync.Map // userID -> *PlayerState
 
 	// Cell maps divided by match
 	cellsMu []sync.RWMutex
@@ -145,8 +144,7 @@ var (
 func GetWorldEngine() *WorldEngine {
 	worldOnce.Do(func() {
 		world = &WorldEngine{
-			playerState:       make(map[string]*PlayerState),
-			playerCell:        make(map[string]int64),
+			//playerCell:        make(map[string]int64),
 			cells:             make(map[int]map[int64]*Cell),
 			cellMatchUpdates:  make(map[int]map[int64]*[]update),
 			groupMatchUpdates: make(map[int]map[int]*[]update),
@@ -228,9 +226,7 @@ func (w *WorldEngine) ensureMatchUpdates(matchId int, groupId *int, cellId *int6
 
 // AddPlayer registers player to world, cells remain persistent and are created lazily and retained
 func (w *WorldEngine) AddPlayer(p *PlayerState) {
-	w.playersMu.Lock()
-	w.playerState[p.UserID] = p
-	w.playersMu.Unlock()
+	w.playerState.Store(p.UserID, p)
 
 	if p.Pos.Lat != 0 && p.Pos.Lon != 0 {
 		li, lj := cellIndices(p.Pos.Lat, p.Pos.Lon)
@@ -241,27 +237,28 @@ func (w *WorldEngine) AddPlayer(p *PlayerState) {
 		c.players[p.UserID] = struct{}{}
 		c.mu.Unlock()
 
-		w.playersMu.Lock()
-		w.playerCell[p.UserID] = ck
-		w.playersMu.Unlock()
+		p.playerMu.Lock()
+		p.CellKey = ck
+		p.playerMu.Unlock()
 	}
 }
 
 // RemovePlayer deletes player from world
 func (w *WorldEngine) RemovePlayer(userID string) {
 	// remove from player maps safely
-	w.playersMu.Lock()
-	ps, hadState := w.playerState[userID]
-	ck, hadCell := w.playerCell[userID]
-	if hadState {
-		delete(w.playerState, userID)
+	val, ok := w.playerState.Load(userID)
+	if !ok {
+		return
 	}
-	if hadCell {
-		delete(w.playerCell, userID)
-	}
-	w.playersMu.Unlock()
+	ps := val.(*PlayerState)
 
-	if hadCell && hadState {
+	ps.playerMu.RLock()
+	ck := ps.CellKey
+	ps.playerMu.RUnlock()
+
+	w.playerState.Delete(userID)
+
+	if ck != 0 {
 		// Remove from cell set
 		c := w.ensureCellExists(ps.MatchID, ck)
 		c.mu.Lock()
@@ -272,29 +269,30 @@ func (w *WorldEngine) RemovePlayer(userID string) {
 
 // FetchAllPublicUsers returns UserData for all known players, used for initial global snapshot on join
 func (w *WorldEngine) FetchAllPublicUsers() []UserData {
-	w.playersMu.RLock()
-	defer w.playersMu.RUnlock()
-	out := make([]UserData, 0, len(w.playerState))
-	for _, ps := range w.playerState {
+	out := make([]UserData, 0)
+
+	w.playerState.Range(func(_, value any) bool {
+		ps := value.(*PlayerState)
 		out = append(out, UserData{
-			UserID:    ps.UserID,
-			Username:  ps.Username,
-			GroupID:   ps.GroupID,
-			GroupName: ps.GroupName,
+			UserID:    	ps.UserID,
+			Username: 	ps.Username,
+			GroupID:  	ps.GroupID,
+			GroupName: 	ps.GroupName,
 		})
-	}
+		return true
+	})
 	return out
 }
 
+
 // Validate, move and append updates across matches
 func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
-	// quick read lock to fetch player state pointer
-	w.playersMu.RLock()
-	ps, ok := w.playerState[userID]
-	w.playersMu.RUnlock()
+	// quick read to fetch player state pointer
+	val, ok := w.playerState.Load(userID)
 	if !ok {
 		return
 	}
+	ps := val.(*PlayerState)
 
 	// validation
 	if math.IsNaN(pos.Lat) || math.IsNaN(pos.Lon) || pos.Lat < -90 || pos.Lat > 90 || pos.Lon < -180 || pos.Lon > 180 {
@@ -314,16 +312,14 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 	}
 
 	// compute old/new keys
-	//ps.playerMu.RLock()
-	w.playersMu.RLock()
-	oldKey, hadOld := w.playerCell[userID]
-	w.playersMu.RUnlock()
-	//ps.playerMu.RUnlock()
+	ps.playerMu.RLock()
+	oldKey := ps.CellKey
+	ps.playerMu.RUnlock()
 	li, lj := cellIndices(pos.Lat, pos.Lon)
 	newKey := cellKey(li, lj)
 
 	// Determine lock order to avoid deadlocks
-	if hadOld {
+	if oldKey != 0 {
 		if oldKey != newKey {
 			// Move between cells
 			newCell := w.ensureCellExists(ps.MatchID, newKey)
@@ -354,13 +350,11 @@ func (w *WorldEngine) ProcessMovement(userID string, pos Position, tick int64) {
 		newCell.mu.Unlock()
 	}
 	// finally update authoritative maps
-	//ps.playerMu.Lock()
-	w.playersMu.Lock()
+	ps.playerMu.Lock()
 	ps.Pos = pos
 	ps.LastTick = tick
-	w.playerCell[userID] = newKey
-	w.playersMu.Unlock()
-	//ps.playerMu.Unlock()
+	ps.CellKey = newKey
+	ps.playerMu.Unlock()
 
 	// Build update entry
 	up := update{UserID: userID, Lat: pos.Lat, Lon: pos.Lon}
@@ -490,6 +484,7 @@ func (m *GlobalMatch) MatchJoin(ctx context.Context, logger runtime.Logger, db *
 			GroupID:   groupID,
 			GroupName: groupName,
 			Pos:       Position{Lat: 0, Lon: 0},
+			CellKey:   0,
 			LastTick:  0,
 			MatchID:   s.MatchID,
 		}
